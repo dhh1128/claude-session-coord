@@ -36,16 +36,16 @@ def add(queue: Sequence[Ask], ask: Ask) -> list[Ask]:
     """Append an ask, refusing the two shapes that cost him time."""
     if ask.kind not in KINDS:
         raise AskError(
-            f"kind {ask.kind!r} is not one of {sorted(KINDS)}: A is something he must go and "
-            "do outside the chat, Q is something a typed reply discharges."
+            f"kind {ask.kind!r} is not one of {sorted(KINDS)}: A is something the user must go "
+            "and do outside the chat, Q is something a typed reply discharges."
         )
     if any(a.tag.upper() == ask.tag.upper() for a in queue):
         raise AskError(f"{ask.tag} is already in the queue; tags must be unique to be citable.")
     if len(ask.text.strip()) < MIN_SELF_CONTAINED:
         raise AskError(
-            f"{ask.tag} does not stand on its own: {ask.text!r}. He does not share your "
-            "context -- restate the subject in the ask itself rather than naming an id he "
-            "would have to go and look up."
+            f"{ask.tag} does not stand on its own: {ask.text!r}. The user does not share "
+            "your context -- restate the subject in the ask itself rather than naming an id "
+            "they would have to go and look up."
         )
     return list(queue) + [ask]
 
@@ -108,7 +108,7 @@ def _resolve(queue: Sequence[Ask], tag: str) -> Ask:
     if len(hits) > 1:
         raise AskError(
             f"{tag!r} is ambiguous between {', '.join(sorted(a.tag for a in hits))}; "
-            "never guess which one he meant."
+            "never guess which one was meant."
         )
     return hits[0]
 

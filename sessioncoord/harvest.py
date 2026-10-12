@@ -107,7 +107,7 @@ def candidates(turns: Sequence[Turn]) -> list[Candidate]:
                 "file in the ask queue (`session-coord ask add`) so it survives this window"
             )
         else:
-            suggestion = "record as a tick (`tick add`) so it outlives this session"
+            suggestion = "record it in your task tracker so it outlives this session"
         out.append(Candidate(tag=tag.tag, kind=tag.kind, text=tag.text,
                              references=refs, suggestion=suggestion))
     return sorted(out, key=lambda c: (c.references, c.tag))

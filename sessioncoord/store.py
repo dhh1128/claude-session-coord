@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .inbox import Message
-from .liveness import PaneMap, partition
+from .liveness import PaneMap, StartMap, partition
 from .comms import Sent
 from .model import Ask, Presence
 
@@ -183,20 +183,27 @@ def remove(repo_root: str, session_id: str) -> bool:
 
 
 def sweep(repo_root: str, pane_claude_pids: PaneMap,
-          server: str | None = None) -> list[Presence]:
+          server: str | None = None, pid_starts: StartMap | bool = True) -> list[Presence]:
     """Delete records whose session is gone. Returns what was dropped.
 
-    Deletes NOTHING when `pane_claude_pids` is None, which is how `tmuxio` reports that it
-    could not consult tmux. That guard is the whole reason the sentinel exists: without it a
+    Deletes no PANE record when `pane_claude_pids` is None, which is how `tmuxio` reports that
+    it could not consult tmux. That guard is the whole reason the sentinel exists: without it a
     ten-second tmux timeout erased every presence record in a repo, and the PreToolUse gate
-    then saw no peers and permitted the commit it exists to refuse.
+    then saw no peers and permitted the commit it exists to refuse. Pane-less records are
+    judged by their pid's start time instead, under the same rule (`liveness.is_live`), so a
+    box with no tmux at all still sweeps its dead sessions.
 
     Runs on every registration, so the registry self-cleans without anybody remembering to
     tidy it -- a crashed session, a closed window, a reboot.
     """
-    if pane_claude_pids is None:
-        return []
-    live, dead = partition(load_all(repo_root), pane_claude_pids, server)
+    records = load_all(repo_root)
+    if pid_starts is True:
+        # Gathered here rather than by every caller: only the pids the registry names, and only
+        # for records that rely on them. `True` means "look it up"; tests pass a literal map.
+        from . import procio
+        pids = [r.claude_pid for r in records if not r.pane and r.claude_pid is not None]
+        pid_starts = procio.starts(pids) if pids else {}
+    live, dead = partition(records, pane_claude_pids, server, pid_starts)
     dropped = []
     for p in dead:
         try:

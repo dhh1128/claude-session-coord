@@ -21,7 +21,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 from . import asks as asks_mod
-from . import comms, detect, gitio, harvest, locks, store, tmuxio
+from . import comms, detect, gitio, harvest, locks, procio, store, tmuxio
 from . import inbox as inbox_mod
 from .model import Ask, Board, CONDUCTOR, Presence
 
@@ -29,6 +29,9 @@ from .model import Ask, Board, CONDUCTOR, Presence
 # First line of `inbox --ids`, so a caller takes bodies and ids from ONE snapshot and strips
 # the machine-readable part before showing the rest to a reader.
 IDS_PREFIX = "#ids "
+
+
+from .who import user as _user
 
 
 def _now() -> str:
@@ -42,16 +45,14 @@ def _resolve_repo(args) -> str | None:
         # one, sees no peers, and is invisible to them -- silent isolation reached by using the
         # tool as documented. Found by the tagged session, in its own code first.
         explicit = os.path.realpath(os.path.expanduser(args.repo))
-        return gitio.repo_root(explicit) or explicit
+        return gitio.workspace_root(explicit)
     # --repo-of names a PATH whose repo we want, which is not always the one containing cwd:
     # `git -C /other/repo add -A` issued from here writes to a different repository's board,
     # and asking this one answered about the wrong tree -- or exited clean, which reads as safe.
     target = getattr(args, "repo_of", None)
     if target:
-        found = gitio.repo_root(os.path.expanduser(target))
-        if found:
-            return found
-    return gitio.repo_root(os.getcwd())
+        return gitio.workspace_root(os.path.expanduser(target))
+    return gitio.workspace_root(os.getcwd())
 
 
 def _live_board(repo: str) -> Board:
@@ -97,6 +98,11 @@ def _live(records, table=None):
         return list(records)
     out = []
     for p in records:
+        if not p.pane:
+            # No pane, so tmux has nothing to say about it: a session outside tmux keeps the
+            # name it registered with, and has no window to go stale.
+            out.append(p)
+            continue
         info = table.get(p.pane or "")
         if info and (p.claude_pid is None or info["claude_pid"] == p.claude_pid):
             p = p.with_(window=info["window"], title=info.get("title") or p.title)
@@ -150,6 +156,10 @@ def _rc(findings) -> int:
 # ---- commands ------------------------------------------------------------------------
 
 def cmd_register(args) -> int:
+    if not args.session:
+        print("session-coord: no session id. Hooks pass --session; by hand, this session must "
+              "already be registered (the SessionStart hook does it).", file=sys.stderr)
+        return 2
     repo = _resolve_repo(args)
     if repo is None:
         print("session-coord: not a git repo; nothing registered.", file=sys.stderr)
@@ -179,6 +189,15 @@ def cmd_register(args) -> int:
 def _title_of(pane: str | None) -> str:
     table = tmuxio.panes() if pane else None
     return ((table or {}).get(pane or "") or {}).get("title", "")
+
+
+def _pid_started(pid: int | None, inherited: Presence | None) -> str:
+    """The start fingerprint for the pid being recorded, kept only while it is the same pid."""
+    if pid is None:
+        return inherited.pid_started if inherited else ""
+    if inherited and inherited.claude_pid == pid and inherited.pid_started:
+        return inherited.pid_started
+    return procio.start_of(pid) or ""
 
 
 def _register_locked(args, repo: str) -> int:
@@ -235,12 +254,13 @@ def _register_locked(args, repo: str) -> int:
         pane=pane,
         window=args.window or tmuxio.window_of(pane or "") or (
             inherited.window if inherited else None),
-        title=_title_of(pane) or (inherited.title if inherited else ""),
+        title=(getattr(args, "name", None) or _title_of(pane)
+               or (inherited.title if inherited else "")),
         # A re-register without --pid must not blank the pid. The documented charter/claim
         # update in SKILL.md omits it, so this path is the common one, and a null pid makes
         # the next sweep treat a running session as dead.
         claude_pid=args.pid if args.pid is not None else (
-            inherited.claude_pid if inherited else None),
+            inherited.claude_pid if inherited else procio.claude_ancestor()),
         charter=args.charter or (inherited.charter if inherited else ""),
         claims=tuple(args.claim) if args.claim else (inherited.claims if inherited else ()),
         role=inherited.role if inherited else None,
@@ -248,6 +268,7 @@ def _register_locked(args, repo: str) -> int:
         updated=_now(),
         transcript=args.transcript or (inherited.transcript if inherited else ""),
         tmux_server=server or "",
+        pid_started=_pid_started(args.pid, inherited),
     )
     try:
         store.save(p)
@@ -412,7 +433,7 @@ def cmd_conductor(args) -> int:
     except locks.Busy as e:
         print(f"session-coord: {e}", file=sys.stderr)
         return 75
-    print(f"conductor: {args.session}. Peers route sequencing questions here, not to Daniel.")
+    print(f"conductor: {args.session}. Peers route sequencing questions here, not to {_user()}.")
     return 0
 
 
@@ -702,6 +723,14 @@ def cmd_msg(args) -> int:
             print(f"filed for {recipient.label}; it already has unread mail, so no doorbell "
                   "rung")
             return 0
+        if not recipient.pane:
+            # Outside tmux there is no prompt to type a doorbell into. The message is delivered
+            # all the same: the UserPromptSubmit hook reads the inbox at the start of the
+            # recipient's next turn. What is lost is only the WAKING of a session that would
+            # otherwise sit idle, and that has to be the human switching to it.
+            print(f"filed for {recipient.label}; it is not in tmux, so it will read this at the "
+                  "start of its next turn")
+            return 0
 
         # THE BUDGET GATES THE DOORBELL, NEVER THE FILING. Filing costs the recipient nothing
         # until it looks; ringing makes it spend a turn reading and usually another replying.
@@ -779,7 +808,24 @@ def _me(repo: str | None) -> Presence | None:
     if not repo:
         return None
     pane = os.environ.get("TMUX_PANE")
-    return next((p for p in _live(store.load_all(repo)) if pane and p.pane == pane), None)
+    records = _live(store.load_all(repo))
+    if pane:
+        return next((p for p in records if p.pane == pane), None)
+    return _mine_by_pid(records)
+
+
+def _mine_by_pid(records) -> Presence | None:
+    """Outside tmux, a session is the claude process this command runs under.
+
+    Matched on pid AND start time, so a record left behind by a process whose pid has since
+    been recycled cannot be mistaken for this session.
+    """
+    pid = procio.claude_ancestor()
+    if pid is None:
+        return None
+    started = procio.start_of(pid)
+    return next((p for p in records if not p.pane and p.claude_pid == pid
+                 and started and p.pid_started == started), None)
 
 
 def _me_anywhere(repo: str | None) -> Presence | None:
@@ -821,10 +867,20 @@ def _me_anywhere(repo: str | None) -> Presence | None:
 
     pane = os.environ.get("TMUX_PANE")
     here = _me(repo)
+    if not pane:
+        # Outside tmux, identity is the pid-and-start-time match `_me` already made; there is
+        # no pane to be confused across a server restart, so `mine` has nothing to add.
+        if here is not None:
+            return here
+        for other in store.known_repos():
+            if repo and other == repo:
+                continue
+            found = _mine_by_pid(store.load_all(other))
+            if found is not None:
+                return found
+        return None
     if here is not None and mine(here):
         return here
-    if not pane:
-        return None
     for other in store.known_repos():
         if repo and other == repo:
             continue
@@ -839,9 +895,11 @@ def _you(repo: str, session_id: str) -> str:
     rec = next((p for p in _live(store.load_all(repo)) if p.session_id == session_id), None)
     if rec is None:
         return ""
+    if not rec.pane:
+        return f"You are {rec.name}. Name sessions, yourself included, by name."
     where = f", now in window {rec.window}" if rec.window else ""
-    return (f"You are {rec.name}{where} (pane {rec.pane}). Window numbers shift when Daniel "
-            "closes a window, so name sessions, yourself included, by name.")
+    return (f"You are {rec.name}{where} (pane {rec.pane}). Window numbers shift when "
+            f"{_user()} closes a window, so name sessions, yourself included, by name.")
 
 
 def cmd_inbox(args) -> int:
@@ -955,7 +1013,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     reg = sub.add_parser("register", help="record this session's presence in a repo")
     repo_arg(reg)
-    reg.add_argument("--session", required=True)
+    reg.add_argument("--session", help="default: this session, found by pane or by claude pid")
+    reg.add_argument("--name", help="a short stable name peers address you by (outside tmux)")
     reg.add_argument("--pane")
     reg.add_argument("--window")
     reg.add_argument("--pid", type=int)
@@ -1003,7 +1062,7 @@ def build_parser() -> argparse.ArgumentParser:
                       help="seconds to wait for the presence lock (default 30)")
     cond.set_defaults(func=cmd_conductor)
 
-    a = sub.add_parser("ask", help="the one queue Daniel reads")
+    a = sub.add_parser("ask", help="the one queue the user reads")
     a.add_argument("action", choices=["add", "list", "answer", "dissolve"])
     repo_arg(a)
     a.add_argument("--session")
@@ -1072,6 +1131,39 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _fill_session(args) -> None:
+    """`--session` defaults to this session, wherever that can be established.
+
+    The skill's commands were written as `--session "$CLAUDE_SESSION_ID"`, but nothing exports
+    that variable to the Bash tool, so on a stock install the documented command passed an
+    empty id. Fall back to this session's own record: by pane under tmux, by claude pid outside.
+    """
+    if not hasattr(args, "session") or args.session:
+        return
+    env = os.environ.get("CLAUDE_SESSION_ID")
+    if env:
+        args.session = env
+        return
+    try:
+        repo = _resolve_repo(args)
+    except Exception:
+        return
+    me = _me(repo) if repo else None
+    if me is not None:
+        args.session = me.session_id
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else list(argv)
+    # `lock <name> -- <command...>`: split at `--` by hand. Python 3.12's argparse hands the
+    # tail to a `nargs="*"` positional; 3.9's -- what a stock macOS `python3` is -- rejects
+    # it as unrecognised arguments.
+    tail = None
+    if argv[:1] == ["lock"] and "--" in argv:
+        i = argv.index("--")
+        argv, tail = argv[:i], argv[i + 1:]
     args = build_parser().parse_args(argv)
+    if tail is not None:
+        args.command = tail
+    _fill_session(args)
     return args.func(args)

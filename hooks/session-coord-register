@@ -24,6 +24,9 @@ from pathlib import Path
 SELF = Path(__file__).resolve()
 # Resolve through the symlink chain to the tools checkout that owns this hook.
 CLI = SELF.parents[1] / "bin" / "session-coord"
+sys.path.insert(0, str(SELF.parents[1]))
+
+from sessioncoord import procio  # noqa: E402  (must follow the path insertion)
 
 
 def main() -> int:
@@ -47,10 +50,15 @@ def main() -> int:
     # `claude-session-registry` inspects the ancestor's argv instead. Do the same here rather
     # than relying on the weaker signal -- flagged in the PR #3 review, by comparison with the
     # hook that already got this right.
-    if not session_id or source in ("print", "background") or not pane:
+    # No pane is no longer a reason to stay out. On a laptop without tmux it is every session,
+    # and they are placed by claude pid and start time instead (`liveness.is_live`). What still
+    # cannot register is a session we cannot place at all: no pane AND no claude ancestor.
+    if not session_id or source in ("print", "background"):
         return 0
-    pid = _claude_ancestor()
-    if pid is not None and _is_headless(pid):
+    pid = procio.claude_ancestor()
+    if pid is not None and procio.is_headless(pid):
+        return 0
+    if not pane and pid is None:
         return 0
 
     if not CLI.exists():
@@ -60,8 +68,9 @@ def main() -> int:
         str(CLI), "register",
         "--session", session_id,
         "--cwd", cwd,
-        "--pane", pane,
     ]
+    if pane:
+        argv += ["--pane", pane]
     if transcript:
         argv += ["--transcript", transcript]
     # The claude process is this hook's own ancestor; walking up to it is cheaper and more
@@ -78,41 +87,6 @@ def main() -> int:
         # genuinely a peer or a finding.
         sys.stdout.write(out.stdout)
     return 0
-
-
-def _is_headless(pid: int) -> bool:
-    """Is this claude a `-p`/`--print`/`--bg` run rather than the pane's conversation?
-
-    Same test `claude-session-registry` applies, for the same reason: a headless run started
-    from a Bash tool call is a child of the pane's real session, shares its TMUX_PANE, and
-    would otherwise overwrite that pane's record with an id that evaporates seconds later.
-    """
-    try:
-        with open(f"/proc/{pid}/cmdline", "rb") as f:
-            argv = [a.decode("utf-8", "replace") for a in f.read().split(b"\0") if a]
-    except OSError:
-        return False
-    flags = {"-p", "--print", "--bg", "--background"}
-    return any(a in flags or a.split("=")[0] in flags for a in argv[1:])
-
-
-def _claude_ancestor() -> int | None:
-    pid = os.getpid()
-    for _ in range(12):
-        try:
-            with open(f"/proc/{pid}/stat") as f:
-                stat = f.read()
-            tail = stat[stat.rfind(")") + 2:].split()
-            ppid = int(tail[1])
-            with open(f"/proc/{ppid}/comm") as f:
-                if f.read().strip() == "claude":
-                    return ppid
-        except (OSError, ValueError, IndexError):
-            return None
-        if ppid <= 1:
-            return None
-        pid = ppid
-    return None
 
 
 if __name__ == "__main__":

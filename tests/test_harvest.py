@@ -75,7 +75,7 @@ class TestCandidates:
         # are loose because nothing durable recorded them, which is what window 8 got wrong.
         turns = [a(MINT)]
         c = candidates(turns)[0]
-        assert c.kind == "P" and "tick" in c.suggestion
+        assert c.kind == "P" and "task tracker" in c.suggestion
 
     def test_asks_are_routed_to_the_queue_rather_than_to_a_tick(self):
         turns = [a("  [ Q-ZNYN ]  Push and merge the PR carrying three sessions' work?")]

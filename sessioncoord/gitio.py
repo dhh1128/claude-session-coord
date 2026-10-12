@@ -42,6 +42,37 @@ def repo_root(path: str, run: Runner = _run) -> str | None:
     return os.path.realpath(root) or None
 
 
+# Files that mark a folder as a project when it is not a git repo. CLAUDE.md and .claude/ are
+# what Claude Code itself treats as a project root; `.session-coord` is an explicit opt-in for
+# a folder that has neither.
+WORKSPACE_MARKERS = (".session-coord", "CLAUDE.md", ".claude")
+
+
+def workspace_root(path: str, run: Runner = _run) -> str:
+    """The key sessions are grouped under: the git main checkout, else a marked folder.
+
+    Written for someone whose projects are folders of research and drafts rather than repos.
+    Sessions that should see each other have to agree on one key, and keying on the exact cwd
+    would split two sessions working in `Acme/` and `Acme/legal/` onto boards of one. So walk
+    up to the nearest folder carrying a marker, stopping short of $HOME (whose `~/.claude` would
+    otherwise make every folder on the machine one workspace), and fall back to the folder
+    itself.
+    """
+    found = repo_root(path, run)
+    if found:
+        return found
+    start = os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+    home = os.path.realpath(os.path.expanduser("~"))
+    cur = start
+    while True:
+        if cur == home or cur == os.path.dirname(cur):
+            break
+        if any(os.path.exists(os.path.join(cur, m)) for m in WORKSPACE_MARKERS):
+            return cur
+        cur = os.path.dirname(cur)
+    return start
+
+
 def workdir(path: str, run: Runner = _run) -> str:
     """The working tree `path` sits in -- the worktree, when there is one."""
     top = run(["git", "rev-parse", "--show-toplevel"], os.path.abspath(path))
@@ -75,6 +106,8 @@ def facts(repo: str, run: Runner = _run) -> RepoFacts:
     felt. `remote_default_sha` is therefore as fresh as the last fetch, which understates
     staleness rather than inventing it -- the same tradeoff `repo-status` already makes.
     """
+    if not run(["git", "rev-parse", "--git-dir"], repo):
+        return RepoFacts(repo_root=repo, is_git=False)
     dflt = default_branch(repo, run)
     return RepoFacts(
         repo_root=repo,

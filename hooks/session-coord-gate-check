@@ -483,20 +483,21 @@ def main():
         return 0
 
     f = shared[0]
+    who = os.environ.get("SESSION_COORD_USER", "").strip() or "the user"
     others = ", ".join(str(s) for s in (f.get("sessions") or [])) or "another session"
     return deny(
         f"This working tree is shared with {others}. {f.get('detail', '')}\n\n"
         "A command that stages, rewrites or cleans here can take their uncommitted files with "
-        "it -- that came within one commit of being real in acme/infra on 2026-09-17, and "
+        "it -- that came within one commit of being real in a private infra repo on 2026-09-17, and "
         "`git clean` would have destroyed the untracked half outright.\n\n"
         f"Do this instead: {f.get('remedy', '')}\n\n"
         "If you moved into a worktree with `cd` rather than with the EnterWorktree tool, this "
         "is why: the gate is handed the SESSION's directory, and a shell `cd` does not change "
         "it. EnterWorktree with your worktree path, then re-register, and this clears.\n\n"
         "If you believe it is wrong for some other reason, tell the CONDUCTOR "
-        "(`session-coord conductor show`) rather than Daniel -- it owns this tooling and can "
+        f"(`session-coord conductor show`) rather than {who} -- it owns this tooling and can "
         "check your case against the live board. Report what you ran and what you observed; "
-        "do not attach a diagnosis. Routing a tool bug to Daniel is the interruption this "
+        f"do not attach a diagnosis. Routing a tool bug to {who} is the interruption this "
         "package exists to remove."
     )
 

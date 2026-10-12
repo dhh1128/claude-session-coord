@@ -193,7 +193,10 @@ class TestLock:
 
 
 class TestUnknownRepo:
-    def test_outside_a_git_repo_it_says_so_and_does_not_crash(self, home, monkeypatch, capsys):
+    def test_outside_a_git_repo_the_folder_is_the_workspace(self, home, monkeypatch, capsys):
+        # Originally this said "not a git repo" and stopped. A folder of research and drafts is
+        # a workspace too, and sessions in it have the same coordination problem.
         monkeypatch.setattr(cli.gitio, "repo_root", lambda p, run=None: None)
+        monkeypatch.chdir(home)
         assert cli.main(["board"]) == 0
-        assert "not a git repo" in capsys.readouterr().err.lower()
+        assert "not a git repo" not in capsys.readouterr().err.lower()

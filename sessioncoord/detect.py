@@ -17,6 +17,8 @@ import posixpath
 from collections import defaultdict
 from typing import Iterable, Sequence
 
+from .who import user
+
 from .model import Board, CONDUCTOR, Finding, Presence, order_findings
 
 
@@ -81,6 +83,9 @@ def detect_shared_tree(board: Board) -> list[Finding]:
     for workdir, group in _group(board.sessions, lambda s: s.workdir.rstrip("/")).items():
         if len(group) < 2:
             continue
+        if not _is_git(board):
+            out.append(_shared_folder(workdir, group))
+            continue
         out.append(Finding(
             code="shared-tree",
             severity="block",
@@ -99,6 +104,36 @@ def detect_shared_tree(board: Board) -> list[Finding]:
             ),
         ))
     return out
+
+
+def _is_git(board: Board) -> bool:
+    return board.facts is None or board.facts.is_git
+
+
+def _shared_folder(workdir: str, group: Sequence[Presence]) -> Finding:
+    """The same hazard in a plain folder, where git cannot be the remedy.
+
+    Nothing stages anything here, so there is nothing for the gate to refuse and the finding is
+    a warning rather than a block. The collision that remains is two sessions writing one
+    document -- a synthesis, a memo, a deck -- each overwriting the other's last edit, or
+    reaching opposite conclusions in adjacent sections without either seeing the other.
+    """
+    return Finding(
+        code="shared-tree",
+        severity="warn",
+        summary=f"{len(group)} sessions are working in the same folder",
+        detail=(
+            f"{workdir} is open in {', '.join(_labels(group))}. Each can overwrite a file the "
+            "other is editing, and neither sees the other's conclusions unless told."
+        ),
+        sessions=_labels(group),
+        workdirs=(workdir,),
+        remedy=(
+            "Each session claims the files it will write (`session-coord register --claim "
+            "'<path>'`), so an overlap is flagged before it happens, and one session owns each "
+            "output document."
+        ),
+    )
 
 
 def detect_shared_branch(board: Board) -> list[Finding]:
@@ -145,7 +180,7 @@ def detect_unworktreed(board: Board) -> list[Finding]:
     Alone, this is harmless and says nothing -- the rule exists to prevent collisions, not for
     its own sake. With company it is the shared-tree hazard waiting for the next arrival.
     """
-    if len(board.sessions) < 2:
+    if len(board.sessions) < 2 or not _is_git(board):
         return []
     exposed = [s for s in board.sessions if s.in_main_checkout]
     if not exposed:
@@ -236,7 +271,7 @@ def detect_no_conductor(board: Board) -> list[Finding]:
         severity="note",
         summary=f"{len(board.sessions)} sessions here and none is sequencing",
         detail=(
-            "With nobody holding the role, every ordering question routes to Daniel, and he "
+            f"With nobody holding the role, every ordering question routes to {user()}, who "
             "becomes the only channel between sessions that cannot see each other."
         ),
         sessions=_labels(board.sessions),

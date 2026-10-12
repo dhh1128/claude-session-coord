@@ -515,7 +515,7 @@ def send(target: str, text: str, run: Runner = _run, expect_pid: int | None = No
     if run(["tmux", "send-keys", "-t", pane, "Enter"]) is None:
         raise SendRefused(
             f"the message was typed into {pane} but the submit keystroke failed. It is sitting "
-            "unsent in that session's prompt -- tell Daniel rather than retrying, or the "
+            "unsent in that session's prompt -- tell the user rather than retrying, or the "
             "recipient gets it twice."
         )
     return pane

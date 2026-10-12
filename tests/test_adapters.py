@@ -43,6 +43,7 @@ class TestRepoRoot:
 class TestFacts:
     def test_reports_a_local_default_behind_its_remote(self):
         run = FakeGit({
+            "git rev-parse --git-dir": ".git",
             "git symbolic-ref": "origin/main",
             "git rev-parse --verify --quiet main": "aaa",
             "git rev-parse --verify --quiet origin/main": "bbb",

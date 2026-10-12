@@ -48,6 +48,10 @@ class Presence:
     # Empty means a record written before this field existed; treated as matching, so an
     # upgrade does not sweep everyone.
     tmux_server: str = ""
+    # When the recorded claude process started, as `procio.start_of` fingerprints it. This is
+    # the liveness proof for a session with no tmux pane -- the ordinary case on a laptop. A pid
+    # alone is recycled; a pid that started at the recorded moment is the same process.
+    pid_started: str = ""
 
     @property
     def label(self) -> str:
@@ -155,6 +159,9 @@ class RepoFacts:
     remote_default_sha: str = ""
     dirty_paths: tuple[str, ...] = ()
     branches_with_commits: Mapping[str, int] = field(default_factory=dict)
+    #: False for a plain folder used as a workspace. The git-shaped hazards -- `git add -A`,
+    #: branch switches, worktrees -- do not exist there, and remedies naming them are noise.
+    is_git: bool = True
 
     @property
     def default_branch_in_sync(self) -> bool:
