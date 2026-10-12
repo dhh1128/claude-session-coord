@@ -1,0 +1,505 @@
+#!/usr/bin/env python3
+"""The expensive half of the PreToolUse gate, reached only for git writes.
+
+Refuses exactly one thing: a git command that mutates a working tree or index, run in a tree
+another live session is ALSO sitting in. That is the 2026-09-17 near-miss -- `infra:6`'s tree
+held `infra:11`'s uncommitted audit and `infra:6` commits with `git add -A`; one more commit
+and it would have landed a stranger's work under its own message, silently.
+
+## Why this tokenises instead of matching
+
+The first five versions of this file parsed shell with a regular expression, and review found a
+new hole in it every round: `sudo -u daniel git add` slipped past because the wrapper's flag
+took a value, `bash -c 'git add -A'` because the write was inside a string, `printf 'x; git add
+-A'` was DENIED because a quoted semicolon looked like a command boundary, and
+`git commit -m '-C /safe'` was scoped to the wrong tree because an argument looked like an
+option. Those are not five bugs. They are one bug -- a regex cannot see quoting -- wearing five
+hats, and patching it five times was the wrong answer each time.
+
+`shlex` knows about quoting. Everything below walks tokens.
+
+## What it must get right, in order
+
+**Never miss a write.** A missed write is the collision this whole package exists to prevent.
+**Never deny a non-write.** A gate that blocks legitimate work gets switched off, and then it
+misses every write. **Never crash.** It runs on every git-ish Bash call in every session, so a
+traceback here degrades the whole session; every failure path returns 0 and permits.
+
+Neither of those fallbacks is the repo-wide question any more, and the reversal is worth stating
+because the old rule reads as the conservative one. A command that cannot be tokenised is a
+write only if a write verb appears in its raw text, and every check names a tree: the caller's
+own, plus every directory the command mentions. Asking repo-wide when the tree could not be
+named denied EVERY session in the repo, including the ones sitting in their own worktrees doing
+what the gate's own remedy tells them to do. The residual gap is a write into a tree nobody
+named (`cd $VAR && git add -A`), and that trade is deliberate: a rare miss beats a gate that
+refuses compliant sessions, because the second one ends with the gate switched off and then
+every write goes through.
+"""
+
+import json
+import os
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+CLI = Path(__file__).resolve().parents[1] / "bin" / "session-coord"
+
+# git subcommands that write to the index or the working tree.
+#
+# `clean` is on this list because of the incident rather than by category, and it is the most
+# destructive entry: `git clean -fd` in a shared checkout deletes a peer's UNTRACKED files
+# outright and irreversibly, and the 2026-09-17 near-miss involved exactly two untracked files.
+# Everything else here stages or rewrites; that one destroys.
+WRITE_VERBS = {
+    "add", "commit", "merge", "rebase", "checkout", "switch", "stash", "rm", "mv",
+    # `pull` is `fetch` plus `merge`, and the merge half lands in the working tree. Its absence
+    # was the most embarrassing gap in eleven rounds: the 2026-09-17 incident WAS a session
+    # merging origin/main into a branch two others were committing to, and `git pull` is the
+    # ordinary way that happens. `fetch` alone is deliberately absent -- it touches no file.
+    "pull", "reset", "restore", "cherry-pick", "revert", "apply", "am", "clean",
+    # Plumbing that writes the INDEX or the WORKING TREE directly, without going through a verb
+    # a human would recognise as staging. `git update-index --add` stages a peer's path with no
+    # `git add` anywhere in the command line.
+    #
+    # Deliberately narrow. A first pass at this list also held `worktree`, `submodule`, `gc`,
+    # `prune`, `update-ref`, `write-tree` and `symbolic-ref`, and the suite immediately caught
+    # `git worktree list` -- a read -- being denied. Those either do not touch a peer's files
+    # (`update-ref`, `gc`) or have a read as their commonest form (`worktree list`,
+    # `submodule status`). Denying them would be the false-refusal failure, which ends with the
+    # gate switched off and every real write permitted.
+    "update-index", "read-tree", "checkout-index", "sparse-checkout", "filter-branch",
+}
+
+# Prefixes that run a command without being one. Each maps to whether its own options may take
+# a separate value -- `sudo -u daniel git add` was missed because `-u` consumes `daniel`.
+WRAPPERS = {
+    "sudo": True, "env": True, "command": False, "builtin": False, "exec": False,
+    "nice": True, "ionice": True, "time": False, "nohup": False, "stdbuf": True,
+    "setsid": False, "timeout": True, "doas": True,
+}
+SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
+
+# git's own options, before the subcommand. Those that take a separate value must be known, or
+# their value gets read as the subcommand.
+GIT_OPTS_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
+
+# Environment variables that move where a write lands.
+GIT_ENV_REDIRECTS = {"GIT_WORK_TREE", "GIT_DIR", "GIT_INDEX_FILE", "GIT_COMMON_DIR"}
+
+OPERATORS = {";", "&&", "||", "|", "&", "\n"}
+
+
+def _logical_lines(command):
+    """Split on newlines that are NOT inside quotes, skipping heredoc bodies.
+
+    `str.splitlines` cuts through a quoted string and through a heredoc, and both are ordinary
+    things to write: a multi-line message argument, and `cat <<EOF ... EOF` whose body contains
+    example commands. Cutting them produced fragments that either failed to lex -- assumed to
+    be writes -- or looked like commands nobody ran.
+    """
+    lines, buf = [], []
+    quote = None          # "'" or '"' while inside one
+    heredoc = None        # the delimiter we are waiting for, while inside a body
+    heredoc_tabs = False  # `<<-` strips leading TABS from the terminator; `<<` strips nothing
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if heredoc is not None:
+            if ch == "\n":
+                # Match the delimiter the way the shell does. `.strip()` here accepted any
+                # body line with spaces around the delimiter as the terminator -- so a heredoc
+                # containing an indented ` EOF ` ended early, and the rest of its body was then
+                # scanned as commands and could be falsely denied. That is the false-refusal
+                # failure this function exists to fix, reintroduced inside the fix.
+                line = "".join(buf)
+                if (line.lstrip("\t") if heredoc_tabs else line) == heredoc:
+                    heredoc = None
+                buf = []
+            else:
+                buf.append(ch)
+            i += 1
+            continue
+        if quote:
+            buf.append(ch)
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                buf.append(command[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in "\"'":
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            buf.append(ch)
+            buf.append(command[i + 1])
+            i += 2
+            continue
+        if command[i:i + 2] == "<<":
+            j = i + 2
+            dash = j < n and command[j] == "-"
+            if dash:
+                j += 1
+            while j < n and command[j] in " \t":
+                j += 1
+            k, q = j, None
+            if k < n and command[k] in "\"'":
+                q = command[k]
+                k += 1
+            delim = []
+            while k < n and (command[k].isalnum() or command[k] in "_-."):
+                delim.append(command[k])
+                k += 1
+            if q and k < n and command[k] == q:
+                k += 1
+            if delim:
+                # The rest of THIS line is still a command; the body starts after the newline.
+                buf.append(command[i:k])
+                while k < n and command[k] != "\n":
+                    buf.append(command[k])
+                    k += 1
+                lines.append("".join(buf))
+                buf = []
+                heredoc, heredoc_tabs = "".join(delim), dash
+                i = k + 1
+                continue
+        if ch == "\n":
+            lines.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    if buf:
+        lines.append("".join(buf))
+    return lines
+
+
+class Unparseable(Exception):
+    """The command could not be tokenised.
+
+    `analyse` then decides on the RAW TEXT: a write verb in it means assume a write, and its
+    absence means this is not a write at all. It used to mean "assume a write, ask widely"
+    unconditionally, which refused ordinary multi-line commands containing no git.
+    """
+
+
+def _segments(command):
+    """Split a command line into pipeline segments, respecting quotes.
+
+    `shlex` with `punctuation_chars` emits operators as their own tokens, so a `;` inside a
+    quoted string stays part of its word -- which is the whole reason `printf 'x; git add -A'`
+    must not read as two commands.
+
+    Lines are split FIRST, because shlex treats a newline as ordinary whitespace and never
+    emits it as an operator. Without this, a perfectly normal multi-line Bash call --
+
+        echo starting
+        git add -A
+
+    -- lexes into a single argv beginning with `echo`, `_git_write` never sees the second
+    command, and the write goes ungated. Multi-line commands are the house style in this
+    environment rather than an edge case, so that was a wide-open door.
+
+    Newlines are found with a quote-aware scan rather than `str.splitlines`, and heredoc bodies
+    are skipped. Round seven split on every newline and accepted the consequence -- a quoted
+    multi-line string broke, raised Unparseable, and the caller assumed a write. That looked
+    like a safe trade until it was measured against real use: a peer session's `session-coord
+    msg` was refused because its MESSAGE spanned two lines, so the tool's own inter-session
+    channel was blocked by the tool's own gate. Then the author's own heredoc was refused, for
+    containing `git add -A` as example text inside `<<'PYEOF'`. A multi-line message with no
+    git in it at all was refused too, which is the tell that the trade was never about git.
+
+    That is the false-refusal failure, and it is the one that ends with the gate switched off.
+    """
+    out = []
+    for line in _logical_lines(command):
+        if not line.strip():
+            continue
+        lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        try:
+            tokens = list(lexer)
+        except ValueError as e:  # unbalanced quote, trailing backslash, a quoted newline
+            raise Unparseable(str(e)) from e
+        current = []
+        for tok in tokens:
+            if tok in OPERATORS:
+                if current:
+                    out.append(current)
+                current = []
+            else:
+                current.append(tok)
+        if current:
+            out.append(current)
+    return out
+
+
+def _strip_prefix(argv):
+    """Drop leading assignments and wrappers. Returns (argv, env_redirects_seen)."""
+    redirects = False
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if "=" in tok and not tok.startswith("-") and tok.split("=", 1)[0].isidentifier():
+            if tok.split("=", 1)[0] in GIT_ENV_REDIRECTS:
+                redirects = True
+            i += 1
+            continue
+        name = os.path.basename(tok)
+        if name in WRAPPERS:
+            takes_value = WRAPPERS[name]
+            i += 1
+            while i < len(argv) and argv[i].startswith("-"):
+                if takes_value and "=" not in argv[i] and i + 1 < len(argv):
+                    i += 1  # the flag's value, e.g. `sudo -u daniel`
+                i += 1
+            continue
+        break
+    return argv[i:], redirects
+
+
+def _git_write(argv):
+    """(is_write, explicit_tree, redirected) for one already-prefix-stripped segment.
+
+    `explicit_tree` is the argument of a single unambiguous `-C`; `redirected` says the write
+    lands somewhere this cannot name. Both feed the scoping decision.
+    """
+    if not argv or os.path.basename(argv[0]) != "git":
+        return False, None, False
+    trees, redirected = [], False
+    i = 1
+    while i < len(argv):
+        tok = argv[i]
+        if not tok.startswith("-"):
+            # Two `-C`s is ambiguous rather than absent: git applies them cumulatively, and
+            # answering "no explicit tree" would have let the caller's cwd stand in for a
+            # directory the write does not land in.
+            if len(trees) > 1:
+                return tok in WRITE_VERBS, None, True
+            return tok in WRITE_VERBS, (trees[0] if trees else None), redirected
+        # git accepts the ATTACHED short form too -- `-C/repo`, `-C../other` -- which the
+        # exact-match test skipped as an unknown option, leaving the write scoped to the
+        # caller's cwd. Normalise it into the separated form before anything else looks.
+        if tok.startswith("-C") and tok not in ("-C",) and not tok.startswith("-C="):
+            trees.append(tok[2:])
+            i += 1
+            continue
+        key = tok.split("=", 1)[0]
+        if key in ("-C", "--work-tree", "--git-dir", "--namespace"):
+            value = tok.split("=", 1)[1] if "=" in tok else (
+                argv[i + 1] if i + 1 < len(argv) else "")
+            if key == "-C" and "$" not in value:
+                trees.append(value)
+            else:
+                # A --work-tree/--git-dir moves the write somewhere -C cannot describe, and a
+                # value still carrying a `$` is a variable shlex does not expand -- an
+                # unexpanded name is not an answer, and guessing it would scope the check to a
+                # directory that does not exist.
+                redirected = True
+            i += 1 if "=" in tok else 2
+            continue
+        if key in GIT_OPTS_WITH_VALUE:
+            i += 1 if "=" in tok else 2
+            continue
+        i += 1
+    return False, None, redirected
+
+
+def candidate_trees(command, cwd):
+    """Every directory this command mentions that could be the tree it writes to.
+
+    Used when `analyse` cannot name one. Falling back to "no hint" made `cmd_check` resolve the
+    repo from the caller's cwd, so `cd /other/repo && git add -A` asked THIS repo's board about
+    a collision in a different one -- conservative within the wrong repository is not
+    conservative. Every candidate gets its own question instead.
+    """
+    out = []
+    try:
+        segments = _segments(command)
+    except Unparseable:
+        return out
+    for argv in segments:
+        argv, _ = _strip_prefix(argv)
+        if not argv:
+            continue
+        if os.path.basename(argv[0]) in ("cd", "pushd") and len(argv) > 1:
+            out.append(argv[1])
+        i = 0
+        while i < len(argv):
+            tok = argv[i]
+            if tok.startswith("-C") and tok not in ("-C",) and not tok.startswith("-C="):
+                out.append(tok[2:])
+            elif tok in ("-C", "--work-tree", "--git-dir") and i + 1 < len(argv):
+                out.append(argv[i + 1])
+            elif tok.startswith(("--work-tree=", "--git-dir=", "-C=")):
+                out.append(tok.split("=", 1)[1])
+            i += 1
+    return [p for p in out
+            if p and "$" not in p
+            and os.path.abspath(os.path.join(cwd, p)) != os.path.abspath(cwd)]
+
+
+def analyse(command, cwd):
+    """(is_write, workdir_or_None) for a whole command line.
+
+    `workdir_or_None`: the tree the write lands in when that is unambiguous, else None meaning
+    "the tree could not be named" -- on which `main` asks about the caller's own tree plus
+    every directory the command mentions, never the repo-wide question.
+
+    Raises nothing. An unparseable command is a write only when a write verb appears in its raw
+    text; without one it is reported as a non-write, so the checker agrees with the bash
+    prefilter that short-circuits on the same absence.
+    """
+    try:
+        segments = _segments(command)
+    except Unparseable:
+        # We could not parse it -- but we also never IDENTIFIED a write in it, and denying on
+        # that basis refused ordinary multi-line commands with no git in them at all.
+        #
+        # That refusal was invisible in production only because the bash prefilter short-circuits
+        # when the payload contains no `git`, which meant the prefilter was quietly load-bearing
+        # for CORRECTNESS while documented as an optimisation. Anyone widening it would have
+        # turned the latent refusal live. Found by a peer session probing both layers separately
+        # -- the checker alone and the deployed pair -- and getting different answers.
+        #
+        # So the fallback scans the raw text for a write verb. Present: assume a write and ask
+        # widely, which is the conservative answer for something we cannot read. Absent: it is
+        # not a write, and the two layers now agree on their own.
+        lowered = command.lower()
+        if any(f"git {v}" in lowered or f"git-{v}" in lowered for v in WRITE_VERBS):
+            return True, None
+        return False, None
+    write, tree, uncertain = False, None, False
+    for argv in segments:
+        argv, env_redirect = _strip_prefix(argv)
+        if not argv:
+            continue
+        name = os.path.basename(argv[0])
+        if name in SHELLS:
+            # `bash -c 'git add -A'`. Recurse into the script rather than giving up, but never
+            # trust the outer cwd for it -- a nested `cd` is invisible from here.
+            for j, tok in enumerate(argv[1:], 1):
+                if tok == "-c" and j + 1 < len(argv):
+                    inner_write, _ = analyse(argv[j + 1], cwd)
+                    if inner_write:
+                        write, uncertain = True, True
+            continue
+        if name in ("cd", "pushd"):
+            uncertain = True  # what follows runs somewhere this cannot name
+            continue
+        is_write, explicit, redirected = _git_write(argv)
+        if is_write:
+            write = True
+            if env_redirect or redirected:
+                uncertain = True
+            elif explicit is not None:
+                tree = explicit if tree in (None, explicit) else None
+                if tree is None:
+                    uncertain = True
+            elif tree is None and not uncertain:
+                tree = cwd
+    if not write:
+        return False, None
+    if uncertain or tree is None:
+        return True, None
+    return True, tree if os.path.isabs(tree) else os.path.join(cwd, tree)
+
+
+def deny(reason):
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }))
+    return 0
+
+
+def main():
+    try:
+        payload = json.load(sys.stdin)
+    except (ValueError, OSError):
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+    tool_input = payload.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str):
+        return 0
+    cwd = payload.get("cwd") or os.getcwd()
+    if not isinstance(cwd, str):
+        return 0
+    if not CLI.exists():
+        return 0
+
+    try:
+        is_write, workdir = analyse(command, cwd)
+    except Exception:
+        return 0  # never be the thing that breaks a session
+    if not is_write:
+        return 0
+
+    def ask(tree):
+        # --repo-of as well as --workdir. `git -C /other/repo add -A` issued from here writes to
+        # a DIFFERENT repository's board, and asking this repo's board about it checked the
+        # wrong one -- or exited clean because the answer was about a tree nobody here shares.
+        argv = [str(CLI), "check", "--json", "--workdir", tree, "--repo-of", tree]
+        try:
+            out = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=15)
+            found = json.loads(out.stdout or "[]")
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return []
+        return found if isinstance(found, list) else []
+
+    # ALWAYS scoped to a named tree -- never the unscoped repo-wide question.
+    #
+    # Asking repo-wide when the tree could not be named looked like the conservative move and
+    # was the worst false positive in the tool. A repo-wide answer includes the main checkout's
+    # shared-tree finding, so ANY command whose tree could not be named denied EVERY session in
+    # the repo -- including the ones sitting in their own worktrees, who had done exactly what
+    # the gate's own remedy tells them to do. Two peer sessions hit it within minutes of each
+    # other, both compliant, and one could not report it because the report tripped the same bug.
+    #
+    # So: the caller's own tree, plus every directory the command names. The residual gap is a
+    # write into a tree nobody named -- `cd $VAR && git add -A`. That is a real miss and it is
+    # the right trade: a rare miss, against denying every compliant session on every ambiguous
+    # command, which is how a gate gets switched off -- after which every write goes through.
+    if workdir is not None:
+        findings = ask(workdir)
+    else:
+        findings = ask(cwd)
+        for cand in candidate_trees(command, cwd)[:4]:
+            findings = findings + ask(cand)
+
+    shared = [f for f in findings if isinstance(f, dict) and f.get("code") == "shared-tree"]
+    if not shared:
+        return 0
+
+    f = shared[0]
+    others = ", ".join(str(s) for s in (f.get("sessions") or [])) or "another session"
+    return deny(
+        f"This working tree is shared with {others}. {f.get('detail', '')}\n\n"
+        "A command that stages, rewrites or cleans here can take their uncommitted files with "
+        "it -- that came within one commit of being real in acme/infra on 2026-09-17, and "
+        "`git clean` would have destroyed the untracked half outright.\n\n"
+        f"Do this instead: {f.get('remedy', '')}\n\n"
+        "If you moved into a worktree with `cd` rather than with the EnterWorktree tool, this "
+        "is why: the gate is handed the SESSION's directory, and a shell `cd` does not change "
+        "it. EnterWorktree with your worktree path, then re-register, and this clears.\n\n"
+        "If you believe it is wrong for some other reason, tell the CONDUCTOR "
+        "(`session-coord conductor show`) rather than Daniel -- it owns this tooling and can "
+        "check your case against the live board. Report what you ran and what you observed; "
+        "do not attach a diagnosis. Routing a tool bug to Daniel is the interruption this "
+        "package exists to remove."
+    )
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,33 @@
+#!/usr/bin/env python3
+"""tools/session-coord — keep several Claude sessions in one repo from tangling.
+
+A thin entry point; everything lives in the `sessioncoord` package next to it. The path
+insertion resolves through the ~/.local/bin symlink, so the package is found wherever this is
+invoked from -- same shape as `pr-merge`.
+
+    session-coord board            who else is working in this repo
+    session-coord check            findings; exit 2 blocks, 1 warns, 0 clean
+    session-coord conductor claim  take the sequencing role for this repo
+    session-coord ask list         the one queue Daniel reads
+    session-coord msg <win> <text> type into another session's prompt
+    session-coord --help           everything else
+
+WHY THIS EXISTS. On 2026-09-17 four sessions were sited in `acme/infra`. One merged
+`origin/main` into a branch two others were committing to, without knowing. Another's working
+tree held a third's uncommitted audit, and it commits with `git add -A`. Seventeen commits on
+one branch split 10/4/3, three belonging to nobody. Untangling it cost Daniel an hour of
+carrying prompts between tmux windows by hand -- which is the expensive part, and the part
+this exists to make unnecessary.
+
+Tests: cd ~/code/me/tools && uv run --no-project --with pytest python -m pytest tests/sessioncoord -q
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from sessioncoord.cli import main  # noqa: E402  (must follow the path insertion)
+
+if __name__ == "__main__":
+    sys.exit(main())

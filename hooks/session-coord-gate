@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# PreToolUse gate — the hot path, and the one place in this tool where bash is the right answer.
+#
+# This fires on EVERY Bash tool call in every session, forever. A Python interpreter spawn is
+# tens of milliseconds; paid on every tool call it is a tax on work that is almost never about
+# to collide with anything. So the cheap question gets asked here, in a shell that is already
+# running, and the expensive one is deferred to `session-coord-gate-check` only when the
+# command is actually a git write.
+#
+# The filter is the command verb rather than the repo state, deliberately: matching a string we
+# already have in memory costs nothing, while working out which repo this is would need a git
+# call -- which is the cost we are trying to avoid.
+#
+# What it protects: `git add -A` in a working tree another session has uncommitted work in.
+# On 2026-09-17 that was one commit away from landing a stranger's audit under the wrong
+# message, in `acme/infra`, and nothing but timing prevented it.
+set -uo pipefail
+
+payload=$(cat)
+
+# Deliberately LOOSE. This is a prefilter whose only job is to decide whether spawning a Python
+# interpreter is worth it, so a false positive costs one interpreter and a false negative costs
+# the guard. `git` plus a writing verb anywhere in the payload is the cheapest test that never
+# misses; the precise, anchored match -- which knows about `/usr/bin/git`, `git -C <dir>`, and
+# the difference between running a command and quoting one -- lives in the checker, where the
+# cost of being right is already being paid.
+#
+# It is an OPTIMISATION and nothing more, and that is now true rather than merely intended. On
+# 2026-09-18 a peer session probed the two layers separately and found they disagreed: the
+# checker alone refused a multi-line command containing no git at all, and only this filter's
+# short-circuit kept that refusal off the box. This file was silently load-bearing for
+# correctness while documented as a performance step, so anyone widening it would have turned a
+# latent refusal live. The checker's Unparseable path now scans for a write verb itself, so the
+# two layers agree on their own and this one can be changed freely.
+case "$payload" in
+  *git*) ;;
+  *) exit 0 ;;
+esac
+case "$payload" in
+  *add*|*commit*|*merge*|*pull*|*rebase*|*checkout*|*switch*|*stash*|*rm*|*mv*|*reset*|*restore*|*cherry-pick*|*revert*|*apply*|*am*|*clean*|*read-tree*|*update-index*|*checkout-index*|*sparse-checkout*|*filter-branch*) ;;
+  *) exit 0 ;;
+esac
+
+checker="$(cd "$(dirname "$0")" && pwd -P)/session-coord-gate-check"
+[ -x "$checker" ] || exit 0
+printf '%s' "$payload" | exec "$checker"

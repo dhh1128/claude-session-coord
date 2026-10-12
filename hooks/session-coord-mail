@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""UserPromptSubmit hook — drain this session's inbox into the turn's context.
+
+`session-coord msg` files a message into the recipient's inbox and rings a doorbell: a line
+typed into its prompt telling it to run `session-coord inbox`. The doorbell is what makes an
+unreachable peer a delay rather than a failure, and it is the right mechanism for WAKING a
+parked session.
+
+It is the wrong mechanism for a session that is about to take a turn anyway. Daniel, on being
+told that nothing prompted a session to read its inbox: *"Shouldn't the session check its inbox
+at the start of every turn?"* It should. This hook does it, so mail is read without anyone
+remembering a command and without a turn being spent on the reading.
+
+WHAT THIS DOES NOT REPLACE. The doorbell still earns its keep, and more clearly now: it wakes a
+session that would otherwise not take a turn for hours. This hook only removes the case where
+the mail was already going to be read late for no reason.
+
+`inbox --quiet` prints nothing when there is nothing, which is what makes this safe to run on
+every prompt in every session. A hook that speaks when it has nothing to say is a hook that
+gets turned off.
+
+Wired by `claude/install.sh` (HOOKS) plus `claude/settings.session-coord.json`.
+"""
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+CLI = Path(__file__).resolve().parents[1] / "bin" / "session-coord"
+
+# Must match `sessioncoord.cli.IDS_PREFIX`.
+IDS_PREFIX = "#ids "
+
+
+def main() -> int:
+    try:
+        payload = json.load(sys.stdin)
+    except (ValueError, OSError):
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+
+    session_id = payload.get("session_id") or ""
+    cwd = payload.get("cwd") or os.getcwd()
+    if not isinstance(session_id, str) or not session_id:
+        return 0
+    if not isinstance(cwd, str) or not CLI.exists():
+        return 0
+
+    # PEEK FIRST, DRAIN LAST, and the order is the whole point.
+    #
+    # `cmd_inbox` marks mail read as part of rendering it. Called plainly, the child persisted
+    # the read markers and only then did this process print its envelope -- so if the hook was
+    # killed, or its stdout broke, in that gap, the mail was already gone from the inbox and
+    # had reached nobody. That is the delivery guarantee inverted by its own bookkeeping, which
+    # is the failure `cmd_inbox` itself documents guarding against one layer down; the outer
+    # layer reintroduced it.
+    #
+    # So: read WITHOUT clearing, deliver, and clear only once delivery has actually happened.
+    # The residual failure is that a crash after printing and before draining shows the same
+    # mail again next turn. That is the correct direction to fail -- a repeat is visible and
+    # harmless, a silent loss is neither.
+    # ONE PEEK. It returns the ids on a sentinel first line and the bodies after it, both from
+    # a single lock-held snapshot.
+    #
+    # The previous version made two peeks -- one for bodies, one for ids -- and they were
+    # separate processes. A message filed between them was in the id list but not in the
+    # bodies, so the acknowledgement marked it read although it had been delivered to nobody.
+    # That is precisely the defect acknowledging-by-id was introduced to fix, reintroduced by
+    # the fix, and it is the third time this handshake has been wrong in the same direction.
+    # Two reads cannot be made consistent by ordering them more carefully; there has to be one.
+    try:
+        peek = subprocess.run(
+            [str(CLI), "inbox", "--quiet", "--peek", "--ids", "--session", session_id,
+             "--repo-of", cwd],
+            cwd=cwd, capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    # A nonzero exit means the read failed, so its stdout says nothing about what is waiting.
+    if peek.returncode != 0:
+        return 0
+
+    out_lines = (peek.stdout or "").splitlines()
+    if not out_lines or not out_lines[0].startswith(IDS_PREFIX):
+        # An older `session-coord` that does not know `--ids`. Deliver nothing rather than
+        # deliver and then acknowledge ids we do not have: a repeat is recoverable, an
+        # acknowledgement of the wrong thing is not.
+        return 0
+    ids = out_lines[0][len(IDS_PREFIX):].split()
+    text = "\n".join(out_lines[1:]).strip()
+    if not text or not ids:
+        return 0
+
+    payload_out = json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": (
+                "Mail from peer sessions, delivered into this turn because it was happening "
+                "anyway — nobody interrupted you for it. Act on it only where it changes what "
+                "you are doing, and do not reply to anything marked "
+                "[no reply needed].\n\n" + text
+            ),
+        }
+    })
+    try:
+        sys.stdout.write(payload_out + "\n")
+        sys.stdout.flush()
+    except OSError:
+        # Delivery did not happen. Leave the mail unread so the next turn tries again.
+        return 0
+
+    # ACKNOWLEDGE THE SNAPSHOT THAT WAS DELIVERED, not whatever is unread by now. The peek and
+    # the drain are separate processes, so a peer can file a message between them; clearing by
+    # recipient marked that new message read although it was never in `text` and reached
+    # nobody. Naming the ids closes the gap.
+    if ids:
+        try:
+            subprocess.run(
+                [str(CLI), "inbox", "--quiet", "--session", session_id, "--repo-of", cwd,
+                 "--ack", ",".join(ids)],
+                cwd=cwd, capture_output=True, text=True, timeout=15)
+        except (OSError, subprocess.SubprocessError):
+            pass  # delivered but not acknowledged: it repeats next turn, the safe direction
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception:
+        # Never be the thing that breaks a session over a peer's message.
+        sys.exit(0)

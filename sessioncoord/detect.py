@@ -1,0 +1,284 @@
+"""What the board notices about a set of live sessions in one repo.
+
+Every detector traces to a cost paid on 2026-09-17 in `acme/infra`. Each one carries its
+incident in a comment, so a future reader can tell an observed hazard from an imagined one --
+and can retire a detector honestly if the hazard stops being real.
+
+The hardest constraint is not what these fire on but what they stay silent about. One session
+alone in a repo is almost every session, and it must produce exactly nothing: a board that
+speaks in the common case gets muted, and a muted board protects nobody.
+
+Pure. Everything comes in on the `Board`; nothing here shells out.
+"""
+
+from __future__ import annotations
+
+import posixpath
+from collections import defaultdict
+from typing import Iterable, Sequence
+
+from .model import Board, CONDUCTOR, Finding, Presence, order_findings
+
+
+def _norm_claim(claim: str) -> str:
+    """A claim reduced to the path prefix it governs.
+
+    `docs/cyber/**` and `docs/cyber/` both govern `docs/cyber`. Trailing glob segments are
+    dropped rather than interpreted: full glob-intersection is a much harder problem than this
+    needs, and the useful cases are a directory against a file inside it.
+    """
+    c = claim.strip().strip("/")
+    while c.endswith("*"):
+        c = c.rstrip("*").rstrip("/")
+    # A claim that reduces to nothing was a repo-wide glob -- `**`, `*`, `.` -- and returning
+    # "" made it collide with NOTHING, which is the exact opposite of what the author meant.
+    # ROOT is a sentinel that overlaps every non-empty claim.
+    return posixpath.normpath(c) if c else ROOT
+
+
+# Everything is inside the repo root, so a claim that normalises to it overlaps all others.
+ROOT = "."
+
+
+def _claims_overlap(a: str, b: str) -> bool:
+    """True when two claims can touch the same file.
+
+    The separator check is load-bearing: a raw `startswith` makes `docs/cyberpunk` read as
+    inside `docs/cyber`, which would produce collisions between sessions that never meet.
+    """
+    x, y = _norm_claim(a), _norm_claim(b)
+    if not x or not y:
+        return False
+    if x == ROOT or y == ROOT:
+        return True
+    if x == y:
+        return True
+    return y.startswith(x + "/") or x.startswith(y + "/")
+
+
+def _group(sessions: Iterable[Presence], key) -> dict:
+    out = defaultdict(list)
+    for s in sessions:
+        k = key(s)
+        if k is not None:
+            out[k].append(s)
+    return out
+
+
+def _labels(sessions: Sequence[Presence]) -> tuple[str, ...]:
+    return tuple(sorted(s.label for s in sessions))
+
+
+def detect_shared_tree(board: Board) -> list[Finding]:
+    """Two or more sessions editing the same files.
+
+    2026-09-17: four sessions sat in `acme/infra`'s single checkout. `infra:6`'s working
+    tree held `infra:11`'s uncommitted audit -- 44 lines of `inventory.md` plus two untracked
+    files -- and `infra:6` commits with `git add -A`. One more commit and it would have
+    landed a stranger's work under its own message, silently. Nothing prevented it but timing.
+    """
+    out = []
+    for workdir, group in _group(board.sessions, lambda s: s.workdir.rstrip("/")).items():
+        if len(group) < 2:
+            continue
+        out.append(Finding(
+            code="shared-tree",
+            severity="block",
+            summary=f"{len(group)} sessions are editing the same working tree",
+            detail=(
+                f"{workdir} is open in {', '.join(_labels(group))}. A `git add -A` in any of "
+                "them reaches the others' uncommitted files, and `git status` shows every "
+                "session changes it did not make."
+            ),
+            sessions=_labels(group),
+            workdirs=(workdir,),
+            remedy=(
+                "Each session takes its own worktree: `git worktree add "
+                "<repo>/.worktrees/<topic> -b <topic> origin/main`, then EnterWorktree into "
+                "it -- a running session can relocate mid-conversation without restarting."
+            ),
+        ))
+    return out
+
+
+def detect_shared_branch(board: Board) -> list[Finding]:
+    """Separate worktrees committing to one branch.
+
+    2026-09-17: `infra:6` and `infra:8` had both been committing to
+    `drill-rename-and-trial-tenant` without knowing about each other. Seventeen commits, split
+    10/4/3 -- and the last three belonged to neither of them. Afterwards nobody could say who
+    wrote them.
+
+    Sessions already caught sharing a tree are excluded: a working tree holds exactly one
+    branch, so reporting both would split one problem into two and dilute the block.
+    """
+    shared_trees = {
+        s.workdir.rstrip("/")
+        for workdir, g in _group(board.sessions, lambda s: s.workdir.rstrip("/")).items()
+        if len(g) > 1
+        for s in g
+    }
+    candidates = [s for s in board.sessions if s.workdir.rstrip("/") not in shared_trees]
+    out = []
+    for branch, group in _group(candidates, lambda s: s.branch).items():
+        if len(group) < 2:
+            continue
+        out.append(Finding(
+            code="shared-branch",
+            severity="warn",
+            summary=f"{len(group)} sessions are committing to `{branch}`",
+            detail=(
+                f"{', '.join(_labels(group))} are on `{branch}` from different worktrees. "
+                "Commit authorship will not be recoverable afterwards, and a rebase or a "
+                "merge by one of them rewrites history the others are building on."
+            ),
+            sessions=_labels(group),
+            workdirs=tuple(sorted(s.workdir.rstrip("/") for s in group)),
+            remedy="Give each session its own branch, or name one owner for this one.",
+        ))
+    return out
+
+
+def detect_unworktreed(board: Board) -> list[Finding]:
+    """A session in the repo's main checkout while others are live here.
+
+    Alone, this is harmless and says nothing -- the rule exists to prevent collisions, not for
+    its own sake. With company it is the shared-tree hazard waiting for the next arrival.
+    """
+    if len(board.sessions) < 2:
+        return []
+    exposed = [s for s in board.sessions if s.in_main_checkout]
+    if not exposed:
+        return []
+    shared = {
+        s.workdir.rstrip("/")
+        for _, g in _group(board.sessions, lambda s: s.workdir.rstrip("/")).items()
+        if len(g) > 1
+        for s in g
+    }
+    exposed = [s for s in exposed if s.workdir.rstrip("/") not in shared]
+    if not exposed:
+        return []
+    return [Finding(
+        code="unworktreed",
+        severity="warn",
+        summary=f"{', '.join(_labels(exposed))} is working in the main checkout",
+        detail=(
+            f"{len(board.sessions)} sessions are live in {board.repo_root}. A session in the "
+            "main checkout shares its files with the next one to arrive, and a branch switch "
+            "there yanks the floor out from under any session parked in it."
+        ),
+        sessions=_labels(exposed),
+        workdirs=tuple(sorted(s.workdir.rstrip("/") for s in exposed)),
+        remedy=(
+            "`git worktree add <repo>/.worktrees/<topic> -b <topic> origin/main`, then "
+            "EnterWorktree into it. No restart and no lost context."
+        ),
+    )]
+
+
+def detect_claim_overlap(board: Board) -> list[Finding]:
+    """Two sessions that have declared an interest in the same file.
+
+    2026-09-17: `.github/workflows/ci.yml`'s gate list is a single hand-edited line every
+    workstream appends to, and `AGENTS.md` states a count that any addition invalidates.
+    Three of four sessions touched them and they broke twice in a day. Worse, `AGENTS.md:107`
+    read identically on both sides of the merge, so git produced no conflict and the file was
+    silently wrong -- a conflict you must resolve is the safe case.
+    """
+    out = []
+    seen: set[tuple[str, str, str]] = set()
+    sessions = list(board.sessions)
+    for i, a in enumerate(sessions):
+        for b in sessions[i + 1:]:
+            hits = sorted({
+                _norm_claim(ca)
+                for ca in a.claims for cb in b.claims if _claims_overlap(ca, cb)
+            })
+            if not hits:
+                continue
+            key = (a.session_id, b.session_id, ",".join(hits))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(Finding(
+                code="claim-overlap",
+                severity="warn",
+                summary=f"{a.label} and {b.label} both claim {', '.join(hits)}",
+                detail=(
+                    f"Declared claims intersect at: {', '.join(hits)}. Git will not warn you "
+                    "if both edits land on lines that merge cleanly while contradicting each "
+                    "other -- a stated count, a hand-maintained list."
+                ),
+                sessions=_labels([a, b]),
+                workdirs=tuple(sorted({a.workdir.rstrip("/"), b.workdir.rstrip("/")})),
+                remedy=(
+                    "Agree an owner for the file, or make the contested thing data rather "
+                    "than a hand-edited sequence so the collision stops existing."
+                ),
+            ))
+    return out
+
+
+def detect_no_conductor(board: Board) -> list[Finding]:
+    """Several sessions live and nobody sequencing them.
+
+    2026-09-17: three sessions each hit the same wall, each correctly refused to guess, and
+    each escalated to Daniel -- who was the only channel between them. One of them asked him
+    for permission to deviate from a rule he had set an hour earlier: the right instinct and
+    the wrong recipient. The missing piece was a role, not better behaviour, and no amount of
+    session discipline substitutes for it.
+    """
+    if len(board.sessions) < 2 or board.conductor is not None:
+        return []
+    return [Finding(
+        code="no-conductor",
+        severity="note",
+        summary=f"{len(board.sessions)} sessions here and none is sequencing",
+        detail=(
+            "With nobody holding the role, every ordering question routes to Daniel, and he "
+            "becomes the only channel between sessions that cannot see each other."
+        ),
+        sessions=_labels(board.sessions),
+        remedy="`session-coord conductor claim` in whichever session has the widest view.",
+    )]
+
+
+def detect_stale_default(board: Board) -> list[Finding]:
+    """The local default branch is behind its remote.
+
+    A worktree cut from a stale local `main` starts from another session's in-flight work
+    rather than from what is released. Silent when git could not tell us -- unknown is not a
+    finding, and crying wolf here trains him to skim the whole board.
+    """
+    facts = board.facts
+    if facts is None or facts.default_branch_in_sync:
+        return []
+    return [Finding(
+        code="stale-default",
+        severity="note",
+        summary=f"local `{facts.default_branch}` is not what the remote has",
+        detail=(
+            f"local {facts.local_default_sha[:7]} vs remote {facts.remote_default_sha[:7]}. A "
+            "worktree cut from here starts from the wrong base."
+        ),
+        remedy=f"`git fetch origin` and branch from `origin/{facts.default_branch}`.",
+    )]
+
+
+DETECTORS = (
+    detect_shared_tree,
+    detect_shared_branch,
+    detect_unworktreed,
+    detect_claim_overlap,
+    detect_no_conductor,
+    detect_stale_default,
+)
+
+
+def check(board: Board) -> list[Finding]:
+    """Every finding for this board, worst first. Empty when there is nothing to say."""
+    found: list[Finding] = []
+    for d in DETECTORS:
+        found.extend(d(board))
+    return order_findings(found)

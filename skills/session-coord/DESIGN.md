@@ -1,0 +1,175 @@
+# session-coord — design
+
+`SKILL.md` holds judgement for the session doing the work. This holds the decisions and why, for whoever comes next — including the reversals, because a design doc that records only the final state hides the most useful part.
+
+## The incident
+
+On 2026-09-17 four Claude sessions were sited in `acme/infra`, all in one checkout. One merged `origin/main` into a branch two others had been committing to, not knowing it was shared. A second's working tree held a third's uncommitted audit — 44 lines of `inventory.md` plus two untracked files — and that session commits with `git add -A`; one more commit and it would have landed a stranger's work under its own message, silently. Seventeen commits sat on one branch split 10 / 4 / 3, and three belonged to nobody: afterwards no one could say who wrote them.
+
+Every session behaved correctly in isolation. Each hit a wall, each refused to guess, each escalated to Daniel. The aggregate was an hour of him carrying prompts between tmux windows by hand, and his verdict is the design brief: *"Three well-behaved sessions producing one badly-behaved system, because nobody was sequencing and you were the only channel between them."*
+
+So the thing being conserved is not correctness of commits. It is Daniel's attention.
+
+## The distinction everything hangs on
+
+**The hazard is the shared working tree, not the shared branch.** Four sessions on four branches in one checkout has the identical `git add -A` bug, because a working tree holds one branch's files at a time and the sessions still share them. Worktrees are the fix precisely because each gets its own files. `CLAUDE.core.md` states this as a global default; this package is what makes it observable.
+
+A corollary that took eleven review rounds to surface: `git pull` is a write. The incident *was* a session merging `origin/main` into a shared branch, and the gate built from that incident did not gate the command that causes it, because attention kept going to exotic plumbing verbs while nobody re-read the porcelain list against the founding event.
+
+## Decisions, with the reasoning
+
+**State lives in `~/.local/state/claude-coord/`, not in the repo.** Daniel's call. A session touches several repos, so per-repo state fragments the thing that has to be global; `.ignored/` multiplies once per worktree and dies when the worktree is removed, taking the record of who was working there with it; and one state root answers "who is where across the estate" with a single scan rather than a walk of fifty repos.
+
+**Presence is a liveness fact, not a lock.** `flock` was the first instinct and is wrong here twice over: the Bash tool spawns a fresh shell per call, so nothing can hold a lock across a turn, and a lock nobody blocks on is just a file. The predicate is positional instead — the recorded pid must still be the claude process in the recorded pane, within the recorded tmux server incarnation. A pane id means nothing across a server restart, and pids get recycled.
+
+**A merge *is* the lock case, and that is where `flock` belongs.** `pr-merge run` is one long-lived process that can hold a lock for its whole life, and a second merge genuinely should wait. `locks.py` covers the merge-and-cleanup tail, never the CI wait — that is where the minutes are, and serializing it would throw away the parallelism that makes running several sessions worthwhile.
+
+**The conductor is a role, not better behaviour.** No amount of session discipline substitutes for somebody sequencing. On the day, three sessions each escalated correctly and produced a badly-behaved system; one asked Daniel for permission to deviate from a rule he had set an hour earlier, which was the right instinct aimed at the wrong recipient. Exactly one holder at a time, enforced under a lock, because two conductors is worse than none — peers would route the same question to different arbiters and nothing would surface the split.
+
+**Silence in the common case is a contract.** One session alone in a repo is almost every session, and every command produces exactly nothing there. A board that speaks when there is nothing to say gets muted, and a muted board protects nobody. `repo-status -q` already works this way for the same reason, and there are tests asserting the silence.
+
+## The rule that kept being rediscovered
+
+**A function that answers a question about the world must be able to say "I could not look", and every caller must treat that differently from "nothing is there".**
+
+This arrived five times through five different doors, across eleven review rounds, and each fix that named a *source* rather than the *property* left it broken everywhere else: a swallowed tmux error; an unreadable `/proc` listing; a malformed pane row; a refused per-process `stat`; a refused `comm` read. Each time the collapse produced the same catastrophe — `sweep` deleting every live presence record, after which the gate reported no peers and permitted exactly the commit it exists to refuse.
+
+It reappeared a sixth time in the storage layer, where it is subtler: a *tolerant reader that loses data*. `load_asks` returned `[]` for a file it could not parse, and the next write saved that empty list over it. A reader that cannot distinguish "nothing here" from "I could not read this" hands its caller a licence to destroy the thing it failed to read.
+
+## The gate has two failure directions and they are not symmetric
+
+A missed write is the collision this package exists to prevent. A false refusal blocks legitimate work — and a gate that blocks legitimate work gets switched off, after which it misses *every* write. So the false refusal is the more dangerous failure, and several decisions follow from that ranking.
+
+The checker tokenises with `shlex` rather than matching a regex, after five rounds in which a pattern was widened five times and grew a new hole each time; a regex cannot see quoting, and those were not five bugs but one wearing five hats. Line splitting is quote-aware and skips heredoc bodies, because splitting on every newline refused a peer's message for spanning two lines and then refused the commit of its own fix. Unparseable input is not automatically a write — it scans for a verb first — because denying what was never identified as a write refused ordinary multi-line commands with no git in them. And the question is always scoped to a named tree, never asked repo-wide, because a repo-wide answer includes the main checkout's collision and therefore denies the very sessions that took worktrees.
+
+The residual gap is deliberate: a write into a tree nobody named, such as `cd $VAR && git add -A`, is missed. That is the right trade against denying every compliant session on every ambiguous command.
+
+## Messaging
+
+Typing into a peer's prompt is the mechanical form of what Daniel was doing by hand, and he authorised it explicitly. It is also the most alarming capability here, so it refuses more than it accepts: control bytes are rejected rather than stripped, text goes out with `send-keys -l` because tmux otherwise parses key *names* out of the message, both tmux calls are checked, and the target must still hold the expected claude process in the expected server.
+
+**The prompt is read before typing, and a busy one refuses.** A peer's message once landed in Daniel's half-typed sentence and both were submitted as one turn; the confusion was the lesser harm, since the Enter also sent something he had not finished writing. An *unreadable* prompt does not refuse, deliberately — the glyph is a TUI detail that will change, and failing closed would silently kill peer messaging estate-wide, which is worse than an occasional collision that the sigil at least makes legible.
+
+**The body is filed in an inbox and only a doorbell is typed.** Filing happens first and ringing second, which is the whole point: the message is delivered when it is filed, and the doorbell only shortens how long it sits unread. A busy or unreachable peer becomes a delay rather than a failure. The doorbell is a runnable command rather than a bare sigil because the recipient is a language model reading its own prompt, not a parser — a bare mark needs a decoder and would be met with "what does this mean?", routed straight back to Daniel.
+
+## Deliberately not done
+
+No MCP server: it would cost tool schemas in every session's context for something that matters in a fraction of them, and needs a process kept alive across reboots. No daemon, for the same reason. Messages are swept by age and never deleted on read, because the pointer outlives the reading and a third session may be sent the same path. The shim in front of the checker is an optimisation only — it was briefly load-bearing for correctness, which is now fixed and commented, so it can be changed freely.
+
+## Reversed
+
+**The ask queue.** Designed as the single ordered list of things Daniel owes an answer to, documented in the skill, and never used once — `asks.json` existed in none of twelve repos with state, including by the session that wrote it. It did not fail because it was per-repo or limited to two tag kinds. It failed because nothing ever prompts a session to file. `tagged` absorbs it and fixes the actual cause structurally, by making `tagged add` the sole source of ids so that minting and filing are one act rather than two.
+
+**A test can pin a wrong decision.** `test_a_malformed_ask_queue_degrades_instead_of_raising` asserted, in green, precisely the behaviour that caused the data loss above, and did so for two rounds. When a test fights a fix, check which of them is wrong.
+
+
+## The doorbell budget, and what it is priced against
+
+Added after the inbox, by the session that had built a competing one and deleted it.
+
+Daniel, 2026-09-18: *"chatty responses that provoke navel-gazing and self-reinforcing
+sycophancy is a waste of my time and token budget... It's kind of like teaching the AIs to treat
+my attention as a precious resource."* The episode: one session relayed to another something it
+had already told him directly; the second messaged back to stop the relay, arriving after it
+was sent; both then narrated the exchange to him. Four turns of his attention, no decision
+changed.
+
+**Why a budget and not a rule.** Both sessions diagnosed the problem *in the same breath as
+committing it* — one wrote, in its own pane, "Each relay was defensible on its own; the
+aggregate is precisely the attention-spend the whole apparatus exists to stop." Self-awareness
+is not the missing ingredient. A rule phrased "ask whether this is necessary" gets a sincere yes
+every time, because each individual message genuinely is defensible. Same shape as this tool's
+own ask queue, documented and used zero times across twelve repos until something enforced it.
+
+**The inbox changed what should be rationed, and improved the design.** The original proposal
+refused the send outright past the budget. With filing in place that would throw a message away
+for being the fourth. So the budget gates the **doorbell only**: over budget, the message is
+still filed and still delivered, and only the interruption is withheld.
+
+**The doorbell is charged on ATTEMPT, and never refunded.** An earlier version refunded a ring the terminal refused, so an unreachable peer cost nothing. That nicety produced three review findings in a row, each fix more elaborate than the last: charging after the ring left a window in which an interruption was free; charging before it and refunding needed an append-only reversal; and the refund was itself wrong, because `SendRefused` covers both *nothing was typed* and *the text was typed but the submit keystroke failed* — refunding the second leaves a doorbell sitting in the peer's prompt, uncharged, which interrupts them the moment they submit. Charging on attempt removes the window, the reversal and the ambiguous outcome together, and prices the thing that was actually spent. It costs a sender one doorbell an hour when a peer is unreachable, which is visible in the log and gone within the hour.
+
+**Decisions.** Three per session-hour, small enough to force triage. The refusal names the three
+already rung, because refusing without showing them is a wall while showing them asks the
+question that matters. `--override` sends past it and still counts, so urgency cannot buy
+headroom. An unattributable send is not budgeted — refusing would block a legitimate message
+over bookkeeping, and charging it to a guessed session would spend somebody else's. The budget
+line rides on `check`, silent below half and always silent under `--quiet`, which is the gate's
+contract for "blocking findings only".
+
+**Replies are opt-in**, `none` by default, with the marker in the body rather than left to
+convention — because the convention is what failed: answering felt collegial and cost a turn on
+both sides.
+
+## Mail is delivered into the turn, not waited for
+
+`claude/hooks/session-coord-mail` drains the inbox on every `UserPromptSubmit` and puts it in
+context. Daniel, on being told nothing prompted a session to read its inbox: *"Shouldn't the
+session check its inbox at the start of every turn?"*
+
+It uses `inbox --quiet`, which already prints nothing when empty — so no new rendering path was
+needed, and a hook that runs on every prompt in every session stays silent in the common case.
+
+This sharpens the two channels rather than collapsing them. **The doorbell wakes a parked
+session; the hook serves one that was going to take a turn anyway.** Both are needed, and saying
+which is which is what stopped a second inbox from being built.
+
+## A duplicate implementation that was deleted rather than merged
+
+This subsystem was built twice, independently, within an hour, because two sessions each had
+something to say and no way to know the other was already saying it. The other implementation
+had notes, an inbox, a `--hook` render path and its own store — roughly the same surface.
+
+It was deleted. Its author's reasoning, recorded because the instinct to merge both was strong:
+the filing half here is better on the case it never handled — a busy peer whose prompt guard
+refuses the send, leaving the message nowhere to go — and two mechanisms for one job is worse
+than either alone. What survived from it is the half this branch did not have: the budget, the
+reply expectation, the discipline sections above, and the delivery hook.
+
+The `--repo` normalisation fix arrived the same way and landed here first: `_resolve_repo` took
+an explicit `--repo` literally, so a session passing `--repo "$PWD"` from inside a worktree keyed
+its state on the worktree, registered on a private board, saw no peers and was invisible to
+them. Silent isolation, reached by using the tool as documented.
+
+## Names, not window numbers, and the window read live (2026-10-10)
+
+Daniel keeps tmux's `renumber-windows on`, because double-digit window numbers are awkward to
+type, and he closes a window whenever its session finishes. So window numbers shift during the
+day. The board stored the window at registration and used it as the session's label, and
+sessions copied those labels into their own context. Within one day this went wrong twice. A
+session in infra:6 introduced itself to a peer as infra:7. Another reported it had no
+response "from infra:7" while it was itself running in infra:7. Daniel, reading both, could
+not tell which window to go to.
+
+Three changes. The window is now read from tmux every time a record is displayed or matched
+(`cli._live`), and the stored one is only a fallback when tmux cannot be consulted. A record
+whose pane now holds a different claude is left alone, because that pane belongs to somebody
+else and the sweep is what retires the record. The stable handle is the pane's title, which
+Claude Code sets to the session's name. The board prints `name (now window)`, `msg` accepts
+the name, and messages carry the sender's name so that the reply hint names it. And the inbox
+opens by telling the reader who it is and which window it is in now.
+
+Rejected: `renumber-windows off`, which makes numbers stable at the cost of gaps. Daniel
+declined it. It would also not have fixed the case of a number reused after a close.
+
+The same day also fixed the busy-prompt check. Claude Code shows a suggested next prompt in dim
+text on an empty prompt line, and the check read it as somebody typing. Every idle peer then
+refused the doorbell, and Daniel was told to press Enter on sentences he had never written. The
+capture now keeps attributes and ignores dim text.
+
+## Known gaps
+
+**Two reads cannot be made consistent by ordering them more carefully.** The mail delivery handshake was wrong in three consecutive review rounds, and each fix added a call rather than making one call sufficient: render-and-clear together lost mail on a crash; peek-then-drain let a message filed in the gap be cleared undelivered; peek-bodies, peek-ids, ack-by-id reintroduced the same bug between its own two peeks. `inbox --ids` now returns ids and bodies from one lock-held snapshot. When two operations must agree about a snapshot, they have to be one operation.
+
+**A missing file is empty; everything else raises.** Four rounds of review on PR #12 found the same defect four times, each a level further in: an unreadable log read as empty, a malformed line skipped anywhere rather than only as a torn final append, a record that parsed cleanly and belonged to nobody, and a timestamp of `NaN` that compares false against every bound and so leaves the window silently. In every case damage was representable as absence, and the accounting reported less than had happened -- the direction that removes a limit rather than enforcing one. `inf` is the mirror: it sits in the window forever and jams the budget at zero. The rule belongs in this module's head, not in its fourth review round.
+
+
+
+Tracked as ticks rather than described here, so they cannot drift from the truth: `~7zua` analyser bypasses, `~7ctg` the checker treating its own timeout as success, `~7wnu` the messaging race across three separate observations, `~7yjt` harvest noise, `~5in5` the three hand-maintained append arrays in `install.sh`, `~2plc` a Stop-hook scan for unfiled ids, `~2xfh` claim-overlap reporting delegation as collision, `~4jtt` the inbox orphaning mail when a session id changes, `~7tpx` the board trusting a recorded workdir that may no longer exist.
+
+That last pair was found after the branch's last commit and is not fixed here. The two were minted as tagged items in a PR body first, which is the drift this section is supposed to be immune to: a gap named in prose on a pull request is invisible to the next session, and the list that was supposed to be authoritative did not contain them. A gap gets a tick id the moment it is named, or it does not count as tracked.
+
+## A note on how the defects were found
+
+Eleven rounds of automated review found 83 real defects in this code and none of the three that made the tool unusable in practice. Those three — the gate refusing peer messages, messages landing mid-sentence, and compliant sessions being blocked — turned up within an hour of it going live, from four sessions actually using it.
+
+Worth pairing with the other pattern from that hour: every peer report of a symptom was accurate, and every cause attached to one was wrong, including mine. A session sees one layer of a system it did not build. Take the observation and re-derive the cause.

@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""SessionStart hook: register this session in its repo, and say who else is here.
+
+Wired for every SessionStart source (startup, resume, clear, compact) with no matcher, for the
+same reason `claude-session-registry` carries none: a resumed session is just as capable of
+colliding as a fresh one, and a `/clear` mints a new session id that the board must follow.
+
+Prints nothing when the session is alone in its repo, which is almost every session. That
+silence is the contract -- a hook that speaks in the common case gets muted, and then it
+protects nobody.
+
+Reads the hook payload on stdin; `TMUX_PANE` comes from the environment, and is the only place
+the pane and the session id meet.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+SELF = Path(__file__).resolve()
+# Resolve through the symlink chain to the tools checkout that owns this hook.
+CLI = SELF.parents[1] / "bin" / "session-coord"
+
+
+def main() -> int:
+    try:
+        payload = json.load(sys.stdin)
+    except (ValueError, OSError):
+        payload = {}
+
+    session_id = payload.get("session_id") or ""
+    cwd = payload.get("cwd") or os.getcwd()
+    transcript = payload.get("transcript_path") or ""
+    source = payload.get("source") or ""
+    pane = os.environ.get("TMUX_PANE", "")
+
+    # A headless `claude -p` run shares the pane with a real conversation. Registering it would
+    # overwrite that pane's record with a throwaway id -- the same trap `claude-session-registry`
+    # guards, and it is worth guarding twice rather than discovering once.
+    #
+    # The `source` strings are checked first because they are cheap, but they are NOT
+    # sufficient: a headless run can arrive with an ordinary SessionStart source, which is why
+    # `claude-session-registry` inspects the ancestor's argv instead. Do the same here rather
+    # than relying on the weaker signal -- flagged in the PR #3 review, by comparison with the
+    # hook that already got this right.
+    if not session_id or source in ("print", "background") or not pane:
+        return 0
+    pid = _claude_ancestor()
+    if pid is not None and _is_headless(pid):
+        return 0
+
+    if not CLI.exists():
+        return 0
+
+    argv = [
+        str(CLI), "register",
+        "--session", session_id,
+        "--cwd", cwd,
+        "--pane", pane,
+    ]
+    if transcript:
+        argv += ["--transcript", transcript]
+    # The claude process is this hook's own ancestor; walking up to it is cheaper and more
+    # reliable than asking tmux, which reports the pane's shell rather than the session.
+    if pid:
+        argv += ["--pid", str(pid)]
+
+    try:
+        out = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    if out.stdout.strip():
+        # Anything printed here lands in the session's context, so it only speaks when there is
+        # genuinely a peer or a finding.
+        sys.stdout.write(out.stdout)
+    return 0
+
+
+def _is_headless(pid: int) -> bool:
+    """Is this claude a `-p`/`--print`/`--bg` run rather than the pane's conversation?
+
+    Same test `claude-session-registry` applies, for the same reason: a headless run started
+    from a Bash tool call is a child of the pane's real session, shares its TMUX_PANE, and
+    would otherwise overwrite that pane's record with an id that evaporates seconds later.
+    """
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            argv = [a.decode("utf-8", "replace") for a in f.read().split(b"\0") if a]
+    except OSError:
+        return False
+    flags = {"-p", "--print", "--bg", "--background"}
+    return any(a in flags or a.split("=")[0] in flags for a in argv[1:])
+
+
+def _claude_ancestor() -> int | None:
+    pid = os.getpid()
+    for _ in range(12):
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                stat = f.read()
+            tail = stat[stat.rfind(")") + 2:].split()
+            ppid = int(tail[1])
+            with open(f"/proc/{ppid}/comm") as f:
+                if f.read().strip() == "claude":
+                    return ppid
+        except (OSError, ValueError, IndexError):
+            return None
+        if ppid <= 1:
+            return None
+        pid = ppid
+    return None
+
+
+if __name__ == "__main__":
+    sys.exit(main())

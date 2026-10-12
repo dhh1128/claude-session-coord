@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""SessionEnd hook: deregister, and surface what this session is about to leave behind.
+
+Daniel, 2026-09-17, on closing a window: *"The major work products get captured, but minor
+details are left dangling, creating hygiene problems."* Window 8 closed carrying a tick that
+was done but still open, a contradiction between two sessions that neither had seen, and a
+Workspace change he had made recorded nowhere. Nothing ran at close, so nothing looked.
+
+This runs at close. It cannot decide anything -- the harvest is explicitly a net rather than a
+verdict -- but it can make sure the field is small and visible rather than lost with the pane.
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+CLI = Path(__file__).resolve().parents[1] / "bin" / "session-coord"
+
+
+def main() -> int:
+    try:
+        payload = json.load(sys.stdin)
+    except (ValueError, OSError):
+        payload = {}
+    session_id = payload.get("session_id") or ""
+    cwd = payload.get("cwd") or os.getcwd()
+    transcript = payload.get("transcript_path") or ""
+    if not CLI.exists():
+        return 0
+
+    # The id becomes a filename below, so it is validated here rather than trusted. A payload
+    # carrying `../` or an absolute path would otherwise make this hook overwrite an arbitrary
+    # file with a harvest report. Deregistration still runs for an invalid id -- refusing to
+    # write a report must not also mean refusing to clean up.
+    safe_id = bool(session_id) and bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}",
+                                                    session_id))
+
+    # The harvest goes to a file rather than to stdout: at SessionEnd nothing is left to render
+    # it into the conversation, and a loose end that scrolls past as the pane closes is a loose
+    # end nobody read. The conductor and the next session in this repo can both pick it up.
+    if transcript and safe_id:
+        out_dir = Path(os.environ.get("XDG_STATE_HOME") or
+                       os.path.expanduser("~/.local/state")) / "claude-coord" / "harvests"
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            report = subprocess.run(
+                [str(CLI), "harvest", "--transcript", transcript, "--quiet"],
+                cwd=cwd, capture_output=True, text=True, timeout=30).stdout
+            if report.strip():
+                (out_dir / f"{session_id}.txt").write_text(report)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    # Deregister EXPLICITLY. A sweep cannot do it: this hook is a child of the still-running
+    # claude process, so at SessionEnd tmux still reports our own pane/pid pair as live and the
+    # sweep correctly keeps the record. The process then exits and the record sits there
+    # warning live sessions about a colleague who has left -- until some later command in the
+    # same repo happens to sweep, which after the LAST session closes is never.
+    try:
+        if safe_id:
+            subprocess.run([str(CLI), "deregister", "--session", session_id],
+                           cwd=cwd, capture_output=True, timeout=10)
+        subprocess.run([str(CLI), "sweep"], cwd=cwd, capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
