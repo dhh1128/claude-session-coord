@@ -17,6 +17,7 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -52,7 +53,11 @@ def _resolve_repo(args) -> str | None:
     target = getattr(args, "repo_of", None)
     if target:
         return gitio.workspace_root(os.path.expanduser(target))
-    return gitio.workspace_root(os.getcwd())
+    # `register --cwd` names where the SESSION is, which is not always where this process runs.
+    # A hook's working directory is the harness's choice, so the session's own directory is the
+    # one to key on when it was given.
+    base = getattr(args, "cwd", None)
+    return gitio.workspace_root(os.path.expanduser(base) if base else os.getcwd())
 
 
 def _live_board(repo: str) -> Board:
@@ -127,7 +132,9 @@ def _render_board(board: Board) -> str:
         where = s.workdir
         if where.startswith(board.repo_root):
             where = "." + where[len(board.repo_root):] or "."
-        lines.append(f"  {s.label:<14} {where}  ({s.branch or 'detached'}){role}")
+        git = board.facts is None or board.facts.is_git
+        branch = f"  ({s.branch or 'detached'})" if git else ""
+        lines.append(f"  {s.label:<14} {where}{branch}{role}")
         lines.append(f"      address as: {s.name}")
         if s.charter:
             lines.append(f"      {s.charter}")
@@ -267,7 +274,7 @@ def _register_locked(args, repo: str) -> int:
         started=inherited.started if inherited else _now(),
         updated=_now(),
         transcript=args.transcript or (inherited.transcript if inherited else ""),
-        tmux_server=server or "",
+        tmux_server=(server or "") if pane else "",
         pid_started=_pid_started(args.pid, inherited),
     )
     try:
@@ -777,6 +784,34 @@ def cmd_msg(args) -> int:
     return 0
 
 
+def addendum_path() -> Path:
+    env = os.environ.get("SESSION_COORD_ADDENDUM")
+    if env:
+        return Path(os.path.expanduser(env))
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return Path(base) / "session-coord" / "addendum.md"
+
+
+def cmd_addendum(args) -> int:
+    """Print the local addendum to the skill: house rules this machine adds to the generic ones.
+
+    The seam that lets one published skill serve people with different surrounding tooling. The
+    generic SKILL.md knows nothing about any particular task tracker, PR pipeline or naming
+    convention; whoever installs it writes theirs into `~/.config/session-coord/addendum.md`
+    (or names a file with `SESSION_COORD_ADDENDUM`), and the skill reads it on load. Silent when
+    there is none, so the common case costs nothing.
+    """
+    path = addendum_path()
+    try:
+        text = path.read_text()
+    except OSError:
+        return 0
+    if text.strip():
+        sys.stdout.write(f"# Local rules from {path} -- these refine the generic skill\n\n")
+        sys.stdout.write(text if text.endswith("\n") else text + "\n")
+    return 0
+
+
 def cmd_lock(args) -> int:
     """Serialize an operation that mutates the repo's shared state.
 
@@ -1102,6 +1137,9 @@ def build_parser() -> argparse.ArgumentParser:
     lk.add_argument("--owner", help="how to name this holder to whoever is waiting")
     lk.add_argument("--status", action="store_true", help="report the holder and exit")
     lk.set_defaults(func=cmd_lock)
+
+    ad = sub.add_parser("addendum", help="print this machine's local rules for the skill, if any")
+    ad.set_defaults(func=cmd_addendum)
 
     ib = sub.add_parser("inbox", help="read and clear messages peers left for this session")
     repo_arg(ib)

@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 SELF = Path(__file__).resolve()
-# Resolve through the symlink chain to the tools checkout that owns this hook.
+# The plugin root: hooks/ and bin/ are siblings under it.
 CLI = SELF.parents[1] / "bin" / "session-coord"
 sys.path.insert(0, str(SELF.parents[1]))
 

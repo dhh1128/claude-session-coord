@@ -241,9 +241,9 @@ def detect_claim_overlap(board: Board) -> list[Finding]:
                 severity="warn",
                 summary=f"{a.label} and {b.label} both claim {', '.join(hits)}",
                 detail=(
-                    f"Declared claims intersect at: {', '.join(hits)}. Git will not warn you "
-                    "if both edits land on lines that merge cleanly while contradicting each "
-                    "other -- a stated count, a hand-maintained list."
+                    f"Declared claims intersect at: {', '.join(hits)}. Nothing will warn "
+                    "you if both edits merge cleanly while contradicting each other -- a stated "
+                    "count, a figure, a hand-maintained list."
                 ),
                 sessions=_labels([a, b]),
                 workdirs=tuple(sorted({a.workdir.rstrip("/"), b.workdir.rstrip("/")})),

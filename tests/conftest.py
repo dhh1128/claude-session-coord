@@ -1,22 +1,10 @@
 """Fixtures for the session-coord suite.
 
-A naming constraint worth knowing before you add a file here. `tools` now carries two test
-suites under one rootdir, and pytest's default import mode resolves a test module by its
-BASENAME -- so `tests/sessioncoord/test_cli.py` and `tests/prmerge/test_cli.py` cannot both
-exist, and `pytest tests` fails to collect with "import file mismatch". That is why this
-suite's CLI tests live in `test_commands.py`. Keep new basenames distinct from `tests/prmerge`
-until somebody sets `--import-mode=importlib` repo-wide, which would fix it properly but also
-changes how the other suite's `from fakes import ...` resolves -- not a change to make behind
-its author's back.
+Run with: uv run --no-project --with pytest python -m pytest tests -q
+(or `python3 -m pytest tests -q` with pytest installed). Python 3.9 or later.
 
 
-The sys.path insert is deliberate and belongs here rather than in ``pytest.ini``. The repo's
-``pytest.ini`` currently says ``pythonpath = src``, which names a directory that has never
-existed in this repo -- so ``prmerge`` and ``sessioncoord`` are importable only because
-``python -m pytest`` happens to put the invocation directory on the path. Doing it here means
-this suite passes under a bare ``pytest tests/sessioncoord`` too, instead of only under the one
-invocation somebody happened to type. Reported to the session that owns ``pytest.ini``; when
-that line becomes ``pythonpath = .`` this block is redundant and can go.
+The sys.path insert makes the package importable under a bare `pytest tests` from anywhere.
 """
 
 from __future__ import annotations

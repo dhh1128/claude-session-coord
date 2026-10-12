@@ -164,7 +164,7 @@ capture now keeps attributes and ignores dim text.
 
 
 
-Tracked as ticks rather than described here, so they cannot drift from the truth: `~7zua` analyser bypasses, `~7ctg` the checker treating its own timeout as success, `~7wnu` the messaging race across three separate observations, `~7yjt` harvest noise, `~5in5` the three hand-maintained append arrays in `install.sh`, `~2plc` a Stop-hook scan for unfiled ids, `~2xfh` claim-overlap reporting delegation as collision, `~4jtt` the inbox orphaning mail when a session id changes, `~7tpx` the board trusting a recorded workdir that may no longer exist.
+Tracked as ticks in the private repository this was extracted from, rather than described here, so they cannot drift from the truth (the ids are meaningful only there): `~7zua` analyser bypasses, `~7ctg` the checker treating its own timeout as success, `~7wnu` the messaging race across three separate observations, `~7yjt` harvest noise, `~5in5` the three hand-maintained append arrays in `install.sh`, `~2plc` a Stop-hook scan for unfiled ids, `~2xfh` claim-overlap reporting delegation as collision, `~4jtt` the inbox orphaning mail when a session id changes, `~7tpx` the board trusting a recorded workdir that may no longer exist.
 
 That last pair was found after the branch's last commit and is not fixed here. The two were minted as tagged items in a PR body first, which is the drift this section is supposed to be immune to: a gap named in prose on a pull request is invisible to the next session, and the list that was supposed to be authoritative did not contain them. A gap gets a tick id the moment it is named, or it does not count as tracked.
 
@@ -173,3 +173,24 @@ That last pair was found after the branch's last commit and is not fixed here. T
 Eleven rounds of automated review found 83 real defects in this code and none of the three that made the tool unusable in practice. Those three — the gate refusing peer messages, messages landing mid-sentence, and compliant sessions being blocked — turned up within an hour of it going live, from four sessions actually using it.
 
 Worth pairing with the other pattern from that hour: every peer report of a symptom was accurate, and every cause attached to one was wrong, including mine. A session sees one layer of a system it did not build. Take the observation and re-derive the cause.
+
+## Ported to a plugin, 2026-10-12
+
+The tool was extracted from a private dev-environment repository so it could be shared, first with a product manager who uses Claude Code for research and writing rather than code. He uses a MacBook, probably without tmux, and many of his projects are folders rather than repos. Measured against that user, the original did nothing at all, and said nothing about doing nothing. The SessionStart hook returned early without a tmux pane. Liveness had no way to call a pane-less record live, so it would have been swept even if it had registered. Every command stopped at "not a git repo". Nothing failed. It was simply absent, which is the worst way for a coordination tool to fail.
+
+**Identity without tmux.** A session is the `claude` process above whatever is asking (`procio.claude_ancestor`). A recorded pid counts as that session only if the process holding the pid now started at the recorded moment (`pid_started`). A bare pid would let a recycled number keep a dead session alive. That is the same reason the tmux path matches pid against pane rather than trusting either alone. `/proc` is read where it exists, and `ps -o ppid=,args=,lstart=` is used where it does not; those fields behave the same on procps and BSD. Each liveness proof fails open on its own source, under the rule already stated above: being unable to observe something is not observing its absence.
+
+**`--session` defaults to this session.** The skill had documented `--session "$CLAUDE_SESSION_ID"`, but nothing exports that variable to the Bash tool, so on a stock install the documented command passed an empty id. The CLI now finds the caller's own record, by pane under tmux and by claude pid outside it.
+
+**A folder is a workspace.** The key is the git main checkout when there is one. Otherwise it is the nearest folder above the session that carries a marker (`.session-coord`, `CLAUDE.md` or `.claude/`), stopping short of `$HOME`, because `~/.claude` exists on every machine that runs Claude Code. Failing those, it is the folder itself. Keying on the exact cwd was rejected: sessions in `Acme/` and `Acme/legal/` would then each have a board of one. In a plain folder, two sessions in the same directory produce a *warning* rather than a block, because there is no `git add -A` for the gate to stop, and the remedy is claims rather than worktrees.
+
+**No doorbell outside tmux.** Typing into another session's prompt needs a terminal multiplexer. Mail is still filed and still delivered at the recipient's next turn by the UserPromptSubmit hook. What is lost is only waking an idle session, and the skill says to ask the human to switch windows in the rare case where that matters.
+
+**Generic skill, local addendum.** The original skill named its author, his task tracker, his PR pipeline and his tagging convention. Those references were what made it useful to him and noise to anyone else. Deleting them would have made it worse for the person it was built for. Instead the skill now says "the user", and `session-coord addendum` prints `~/.config/session-coord/addendum.md` (or `$SESSION_COORD_ADDENDUM`), which the skill reads on load and treats as more specific than itself. `SESSION_COORD_USER` supplies the name used in printed messages. Both are plain environment, so the `env` block of Claude Code's settings reaches hooks and the Bash tool alike. Plugin `userConfig` was considered and rejected: it is exported to hook processes but not to the Bash tool, so the CLI would have needed a second source for the same value.
+
+**Python 3.9.** That is what `/usr/bin/python3` is on a stock Mac. Two things broke: a runtime `X | None` in a type alias, and argparse 3.9 rejecting `lock <name> -- <cmd>`. Both are fixed, and the suite passes on 3.9 and 3.12.
+
+**Names anonymized.** The incident narratives are kept because they are the reasons. The private repository they happened in is called `acme/infra` here, and its window labels are `infra:N`.
+
+**Unverified.** These have not been tested on a real Mac. The `ps` path is exercised on Linux by forcing the fallback, and the `lstart` format is assumed to be stable for the life of a process, which it should be. Two sessions outside tmux have been simulated end to end (register, board, claim overlap, message, delivery, sweep of the dead peer) but have never been run as two real Claude sessions.
+

@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""tools/session-coord — keep several Claude sessions in one repo from tangling.
+"""session-coord — keep several Claude sessions in one repo from tangling.
 
-A thin entry point; everything lives in the `sessioncoord` package next to it. The path
-insertion resolves through the ~/.local/bin symlink, so the package is found wherever this is
-invoked from -- same shape as `pr-merge`.
+A thin entry point; everything lives in the `sessioncoord` package beside `bin/`. The path
+insertion resolves symlinks, so the package is found wherever this is invoked from.
 
     session-coord board            who else is working in this repo
     session-coord check            findings; exit 2 blocks, 1 warns, 0 clean
     session-coord conductor claim  take the sequencing role for this repo
-    session-coord ask list         the one queue Daniel reads
-    session-coord msg <win> <text> type into another session's prompt
+    session-coord ask list         the one queue the human reads
+    session-coord msg <name> <text> leave a peer a message
     session-coord --help           everything else
 
 WHY THIS EXISTS. On 2026-09-17 four sessions were sited in `acme/infra`. One merged
@@ -19,7 +18,7 @@ one branch split 10/4/3, three belonging to nobody. Untangling it cost Daniel an
 carrying prompts between tmux windows by hand -- which is the expensive part, and the part
 this exists to make unnecessary.
 
-Tests: cd ~/code/me/tools && uv run --no-project --with pytest python -m pytest tests/sessioncoord -q
+Tests: uv run --no-project --with pytest python -m pytest tests -q
 """
 
 import sys

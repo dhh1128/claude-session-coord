@@ -1,0 +1,12 @@
+{
+  "name": "session-coord",
+  "owner": { "name": "Daniel Hardman", "url": "https://github.com/dhh1128" },
+  "description": "session-coord: coordination for several Claude Code sessions in one project.",
+  "plugins": [
+    {
+      "name": "session-coord",
+      "source": "./",
+      "description": "Coordinate several Claude Code sessions working in one project."
+    }
+  ]
+}

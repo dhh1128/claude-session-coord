@@ -1,0 +1,17 @@
+{
+  "description": "session-coord: register at start, read peer mail each prompt, refuse a git write into a working tree another live session shares, harvest loose ends at close.",
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/session-coord-register\"", "timeout": 15 } ] }
+    ],
+    "PreToolUse": [
+      { "matcher": "Bash", "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/session-coord-gate\"", "timeout": 15 } ] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/session-coord-mail\"", "timeout": 20 } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/session-coord-end\"", "timeout": 45 } ] }
+    ]
+  }
+}

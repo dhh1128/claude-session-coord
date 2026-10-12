@@ -1,27 +1,23 @@
 ---
 name: session-coord
-description: Coordinate with the other Claude sessions working in this repo — see who else is here and what they are doing, claim or hand off the conductor role that sequences them, file an ask into the one queue Daniel reads, message a peer session directly instead of asking him to carry a paste, and harvest loose ends before a window closes. Use when the board reports peers, when you are about to touch a file another session claims, when you would otherwise ask Daniel to relay something between windows, when a merge or a shared branch needs sequencing, or when this session is finishing. Mechanics live in the `session-coord` command; this skill holds the judgement.
+description: Coordinate with the other Claude Code sessions working in this project — see who else is here and what they are doing, claim the files you will write, claim or hand off the conductor role that sequences them, file a question into the one queue the user reads, message a peer session directly instead of asking the user to carry a paste, and harvest loose ends before a session closes. Use when the session-start notice reports peers, when you are about to write a file another session claims, when you would otherwise ask the user to relay something between sessions, when two sessions' work needs sequencing or their conclusions conflict, or when this session is finishing. Mechanics live in the `session-coord` command; this skill holds the judgement.
 ---
 
-# Coordinating with the other sessions in this repo
+# Coordinating with the other sessions in this project
 
-The hooks already register you, sweep dead sessions, and refuse a staging command in a shared working tree. This skill is for the parts that need judgement.
+The plugin's hooks already register you at session start, deliver peer mail at the start of each turn, refuse a git staging command in a working tree another live session shares, and look for loose ends when a session closes. This skill is for the parts that need judgement.
 
-## Why this exists, in one paragraph
+**First, once per session: run `session-coord addendum`.** If it prints anything, those are this machine's local rules — the user's own trackers, conventions and pipelines — and where they are more specific than this file, they win.
 
-On 2026-09-17 four sessions were sited in `acme/infra`. One merged `origin/main` into a branch two others had been committing to, not knowing it was shared. Another's working tree held a third's uncommitted audit, and it commits with `git add -A` — one more commit and it would have landed a stranger's work under its own message. Seventeen commits on one branch split 10 / 4 / 3, and three belonged to nobody. Every session behaved correctly in isolation: each hit a wall, each refused to guess, each escalated to Daniel. The aggregate was an hour of him carrying prompts between tmux windows, and his verdict was *"Three well-behaved sessions producing one badly-behaved system, because nobody was sequencing and you were the only channel between them."* Sequencing is the missing role, not better behaviour. That is what this skill is for.
+## Why this exists
+
+On 2026-09-17 four sessions were working in one checkout of a private infrastructure repo. One merged `origin/main` into a branch two others had been committing to, not knowing it was shared. Another's working tree held a third's uncommitted audit, and it commits with `git add -A` — one more commit and it would have landed a stranger's work under its own message. Every session behaved correctly in isolation: each hit a wall, each refused to guess, each escalated to the human. The aggregate was an hour of him carrying prompts between windows, and his verdict was *"Three well-behaved sessions producing one badly-behaved system, because nobody was sequencing and you were the only channel between them."*
+
+The same shape shows up without any code. Two sessions researching one market reach different numbers for the same figure and each writes its own into the shared synthesis. Two sessions drafting one memo overwrite each other's last edit. A session asks the user which of two findings is current when the session that produced the newer one is running in the next window. Sequencing is the missing role, not better behaviour.
 
 ## The rule that outranks everything here
 
-**His attention is the scarce resource.** Before you ask him anything, ask whether a peer session could answer it instead — and if it could, ask the peer. A question routed to him that a session could have answered is the failure this whole tool exists to remove.
-
-## When the tooling itself misbehaves, tell the conductor
-
-If `session-coord` refuses something you believe is legitimate — a gate denial you think is wrong, a board that shows you in the wrong place, a message that will not send — **that goes to the conductor, not to Daniel.** The conductor owns this tooling's behaviour, can verify your case against the live board in seconds, and can fix it. Routing it to Daniel turns a tool bug into an interruption, which is the exact cost this package exists to remove. Three sessions did that on 2026-09-18 before anyone noticed the pattern.
-
-**Report the observation. Do not attach a cause.** On that same day four sessions — including the one that wrote this tool — produced an accurate symptom report bolted to a confidently wrong diagnosis, and two of those wrong diagnoses were identical. A session can see one layer of a system it did not build; the cause it infers will be plausible and is usually wrong, and a wrong cause sends the fix in the wrong direction. Say what you ran, what you expected, what happened, and what you checked. Let whoever owns the code re-derive why.
-
-If the conductor is unreachable or is itself the problem, then Daniel — but say that you tried.
+**The user's attention is the scarce resource.** Before you ask them anything, ask whether a peer session could answer it instead — and if it could, ask the peer.
 
 ## Orient first
 
@@ -31,160 +27,94 @@ session-coord check          # what is currently wrong
 session-coord conductor show # who is sequencing
 ```
 
-If you are alone, all three are nearly silent and you should carry on with your work. Nothing below applies.
+If you are alone, all three are nearly silent and you should carry on. Nothing below applies.
 
-## Move with `EnterWorktree`, not with `cd`
+A *project* here is the git repository you are in, or, outside git, the nearest folder above you that contains a `CLAUDE.md`, a `.claude/` directory or an empty `.session-coord` marker file — else the folder itself. Sessions see each other only when they resolve to the same project, so if two sessions that should see each other do not, put a `.session-coord` file in the folder that contains them both.
 
-**This is the single thing most likely to waste your time, so it comes before everything else.**
-
-There are two different ways to "work in a worktree", and only one of them is visible to the gate:
-
-- **`EnterWorktree`** — a Claude Code tool. It moves *the session*. The session's working directory becomes the worktree, and everything downstream sees that.
-- **`cd /path/to/worktree && git commit …`** — a shell command. It moves *one shell invocation*. The session's working directory never changes.
-
-The PreToolUse gate is handed the **session's** directory, not the shell's. So a session that took a worktree and moves into it with `cd` looks, to the gate, exactly like a session still sitting in the shared main checkout — and gets refused, and is shown a remedy it has already followed.
-
-That is not hypothetical. On 2026-09-18 a session did precisely this: its `git rev-parse --show-toplevel` was its own worktree, the main checkout was clean, every commit on its branch held only its own files, and it was blocked anyway. It spent an hour on it, escalated to Daniel, and diagnosed a bug in the gate that did not exist. Two other sessions reached the same wrong conclusion independently.
-
-So: `git worktree add <repo>/.worktrees/<topic> -b <topic> origin/main`, then **`EnterWorktree` with that path**. If you are already using `cd`, switch — `EnterWorktree` relocates a running session with no restart and no lost context.
-
-## Claim your charter and your files
-
-When peers exist, say what you are for and what you will touch:
+## Say who you are, what you are for, and what you will write
 
 ```
-session-coord register --session "$CLAUDE_SESSION_ID" \
-  --charter "One paragraph: what this session is for and roughly where it will stop." \
-  --claim 'claude/install.sh' --claim 'sessioncoord/**'
+session-coord register --name "tam-sizing" \
+  --charter "One paragraph: the question this session is answering and roughly where it will stop." \
+  --claim 'drafts/market-sizing.md' --claim 'data/tam/**'
 ```
 
-Claims are how the collision nobody can see gets caught. `AGENTS.md:107` read *identically* on both sides of the 2026-09-17 merge, so git produced no conflict and the file was silently wrong afterwards. A conflict you have to resolve is the safe case; the dangerous one is two edits that merge cleanly and contradict each other. Claim the file that carries a count, a hand-maintained list, a registry — not every file you might read.
+`--name` is how peers address you. Under tmux the pane title already serves; outside tmux, give yourself a short stable name the first time the board shows peers. `--session` is filled in automatically.
 
-**Registration is a snapshot, not a subscription.** It records where you were when you ran it, and nothing updates it when you move. So re-register after `EnterWorktree`, after a `/clear`, and whenever your charter changes — `register` will warn you when the directory it has recorded is not the one you are in. A session recorded in the wrong place is worse than an unregistered one: it makes the board confidently wrong, and the gate acts on the board.
+**Claims are how the collision nobody can see gets caught.** In git, a file can read identically on both sides of a merge and still be wrong, because two sessions each made an edit that is right alone and contradictory together; in a folder of drafts there is not even a merge to look at. Claim the files you will *write* — the synthesis, the memo, the deck, the file carrying a count or a list — not every file you might read. One session owns each output document. If you need a change in a document another session claims, message that session rather than editing it.
 
-**A claim means you get told, not that you hold the pen.** If a peer needs one line in a file you claimed, the answer is usually "go ahead, tell me when it lands", not "wait for me". Claim to be consulted, not to block — two sessions froze themselves unnecessarily on 2026-09-18 because a glob claim read as ownership of a whole directory.
+**A claim means you get told, not that you hold the pen.** If a peer needs one line in a file you claimed, the answer is usually "go ahead, tell me when it lands". Claim to be consulted, not to block.
+
+**Registration is a snapshot.** Re-register when your charter changes, and in git after you move to a worktree — `register` warns you when the directory it has recorded is not the one you are in.
+
+## In a git repo: one working tree per session
+
+When peers share a git repo, each session should work in its own worktree: `git worktree add <repo>/.worktrees/<topic> -b <topic> origin/main`, then move the *session* there with the **`EnterWorktree`** tool, not with `cd`. The gate is handed the session's directory, so a shell `cd` leaves you looking, to the gate, like a session still sitting in the shared checkout — refused, and shown a remedy you think you have already followed.
+
+If you need to commit into a different repository from the one the session started in, use `git -C /literal/path …` with a literal path. The gate checks only the tree a single `-C` names; with `cd X && git …`, or a path held in a shell variable, it cannot be sure where the write lands and checks your session's own tree as well.
 
 ## The conductor
 
-One session per repo sequences the others. Claim it if you have the widest view:
+One session per project sequences the others. Claim it if you have the widest view:
 
 ```
-session-coord conductor claim --session "$CLAUDE_SESSION_ID"
+session-coord conductor claim
 ```
 
-**Holding it means:** peers route ordering and sequencing questions to you rather than to Daniel; you decide what lands first when several branches are in flight; you adjudicate contradictions between sessions' outputs; and when you must go to him, you go **once**, with a single ordered list.
+**Holding it means:** peers route ordering questions to you rather than to the user; you decide what lands first when several pieces of work are in flight; you **adjudicate contradictions between sessions' outputs** — two figures for one number, two readings of one clause; and when you must go to the user, you go **once**, with a single ordered list.
 
-**Not holding it means:** when you hit a sequencing question — what merges first, whether to wait, where to write given someone else's unpushed work — send it to the conductor, not to Daniel. A session asking him permission to deviate from a rule he set an hour earlier is the right instinct aimed at the wrong recipient.
+**Not holding it means:** when you hit a sequencing question, or find that your conclusion contradicts a peer's, send it to the conductor, not to the user.
 
-Release it before you close, or hand it over explicitly. A conductor that vanishes silently puts him back in the middle.
+Release it before you close (`session-coord conductor release`), or hand it over explicitly. A conductor that vanishes silently puts the user back in the middle.
+
+## When the tooling itself misbehaves, tell the conductor
+
+If `session-coord` refuses something you believe is legitimate, that goes to the conductor first. **Report the observation; do not attach a cause.** Say what you ran, what you expected, what happened, and what you checked. A session can see one layer of a system it did not build, and the cause it infers is plausible and usually wrong. If there is no conductor, or it is the problem, then the user — but say that you tried.
 
 ## Asks: one queue, self-contained, ordered
 
 ```
 session-coord ask add --tag Q-ZNYN --kind Q \
-  --text "Merge the PR that carries three sessions' accumulated work, or split it first?"
+  --text "Use the 2025 or the 2026 analyst figure for the TAM baseline? They differ by 18%."
 session-coord ask list
 ```
 
-Two rules the queue enforces, both from things that cost him time:
+- **An ask must stand on its own.** The user does not share your context. Restate the subject inside the ask; an identifier only the sessions understand makes them reconstruct the context before they can answer. The command refuses a bare identifier.
+- **Say what blocks what.** Use `--depends-on` so the list orders itself. Not knowing whether to answer one question first or go and do something else first is the thing that wastes the most time.
+- `--kind A` is something the user must go and do outside the chat; `--kind Q` is something a typed reply discharges. Fifteen minutes versus one word — never conflate them.
 
-- **An ask must stand on its own.** He was asked to approve `@idymqyp3` and to adjudicate `Q-8RJN` — identifiers meaningful to the sessions and opaque to him, so he had to go and reconstruct the context before he could answer. Restate the subject inside the ask. The command refuses a bare identifier and a verb.
-- **Say what blocks what.** Use `--depends-on` so the list orders itself. He said the thing that drives him crazy is not knowing whether to answer one question first or carry something to another window first. If one ask gates the rest, it should be the only thing he sees.
-
-When a peer's work makes your question moot, retire it yourself — `session-coord ask dissolve --tag Q-8RJN`. Do not make him answer a question that no longer exists.
-
-`--kind A` is something he must go and do outside the chat; `--kind Q` is something a typed reply discharges. Fifteen minutes versus one word — never conflate them. The list prints in dependency order with the kind marked per item, rather than grouped by kind: a question that waits on an errand has to appear *below* that errand, or he is being told to answer something he cannot answer yet.
+When a peer's work makes your question moot, retire it yourself: `session-coord ask dissolve --tag Q-ZNYN`.
 
 ## Talk to peers directly
 
 ```
-session-coord msg "conf-suite-open" "I am about to change .github/workflows/ci.yml's gate list. You claim it too — are you mid-edit?"
+session-coord msg "legal-memo" "tam-sizing here. The TAM figure in drafts/market-sizing.md moved from 3.2B to 4.1B (new source, cited inline). Your section 3 quotes the old one."
 ```
 
-**Name sessions by name, never by window number** — peers, and yourself. Window numbers are not stable: Daniel closes windows when sessions finish, tmux renumbers every window after the closed one, and he keeps it that way. On 2026-10-10 a session in infra:6 introduced itself as infra:7, and another asked after a reply "from infra:7" while it was itself running in infra:7. A session's name is the title Claude Code gives its pane — the one in the prompt border — and the board prints it as `conf-suite-open (now infra:6)`, with the window read from tmux at that moment. `msg` accepts the name (quote it if it has spaces), a pane id or a session id. A window label still works, but it reaches whoever holds that number *now*, and the result line names who that was: read it. Your inbox opens with who you are and where you are now. When you tell Daniel about another session, give the name and its current window together, so he can find it.
+**Name sessions by name**, quoted if it has spaces. The body is filed in the recipient's inbox, and a hook delivers it into their context at the start of their next turn — so a busy peer is a delay, never a failure, and the message can be prose of any length.
 
-**The body is filed in the recipient's inbox; only a doorbell is typed.** What lands in their prompt is exactly ` >>> session-coord inbox`, every time, whatever you said. They run it, read everything waiting, and it clears.
+Under tmux, a short doorbell (` >>> session-coord inbox`) is also typed into the peer's prompt, which wakes a session that would otherwise sit idle. Outside tmux there is no doorbell: the message waits for that session's next turn, and an idle session reads it when the user next switches to it. If a peer needs to act *now* and is idle, that is the one case to tell the user, in one line: "switch to *legal-memo*; it has a message that changes its section 3."
 
-That ordering is what makes this reliable. The message is *delivered* the moment it is filed — the doorbell only shortens how long it sits unread. So a peer who is mid-sentence, or whose prompt cannot be read, is a **delay** rather than a failure: the mail is durable and they get it on their next drain. Before this, three consecutive sends to one session were refused inside a minute and the thing that needed saying went nowhere.
-
-Two consequences worth knowing. **Your message can be prose** — newlines, lists, code — because nothing types it. And **a peer that already has unread mail is not rung again straight away**, so ten messages in a row cost one keystroke against their prompt rather than ten. That silence has a lifetime rather than being permanent: once the oldest unread has sat for ten minutes the next message rings again, because two peers accumulated three and six unread messages inside two hours and read none, and "has been told" had quietly stopped meaning "has unread mail".
-
-Read yours with `session-coord inbox`. Do it when a doorbell arrives, and at the start of a turn if you have been away. `--peek` reads without clearing, and says so in its footer.
-
-A filed message is refused only for a control byte that is neither a newline nor a tab — an escape sequence would reconfigure the reader's terminal when they drain it. The **direct** path is stricter, and it is the one you hit when the target is not registered here: no inbox to file into, so the text is typed, and then it must be one line, non-empty, under 4000 characters, and aimed at a pane holding a live session rather than a shell — sending to a shell would *execute* it. For anything longer than a sentence to an unregistered target, write the detail to a file and send the path.
-
-Daniel authorised this on 2026-09-17 precisely so he stops being the transport. Use it for: telling a peer you are touching its file; asking what a peer's branch contains; telling a peer its blocker has cleared. Do **not** use it to poll peers for opinions — N sessions broadcasting questions at each other is noise, and it is not what any observed failure needed.
-
-Say who you are in the message, by name. The recipient has no idea which window it came from, and by the time it reads the message the window may be a different one.
-
+Say who you are in the message. Do **not** use messages to poll peers for opinions.
 
 ### Before you ring: what does the recipient do differently?
 
-The doorbell is **budgeted at three per hour per session**. Filing is not — it costs the
-recipient nothing until it looks. What is rationed is *interrupting* a peer, which is a much
-narrower claim than telling one something.
+Doorbells are budgeted at three per hour per session; filing is not. Past the budget a message is still filed and delivered, just without the doorbell. Before sending, answer: **what does the recipient do differently because of this? Name the action.** Corrections, sequencing, claims and changed facts pass. Thanks, agreement that changes nothing, status nobody is blocked on, and confirming receipt fail, always.
 
-Past the budget a message is **still filed and still delivered**; the doorbell is simply
-withheld, and the refusal names the three already rung so you can decide which mattered less.
-If it genuinely cannot wait, `--override "<what breaks otherwise>"` rings anyway and records
-why — the override still counts, because the recipient still spent the turn.
+**Replies are opt-in.** `--reply none` is the default and the body carries `[no reply needed]`. Answering one costs two turns and buys nothing.
 
-Before ringing, answer this:
+### Never narrate peer traffic to the user
 
-> **What does the recipient do differently in the next hour because of this? Name the action.**
+Do not report what you said to a peer, or what a peer said to you, unless it changes a decision the user holds. Coordination is infrastructure: they see its results, not its transcript.
 
-If you cannot name one, file it without urgency and let their next turn pick it up. *"They
-would know I appreciated the catch"* is not an action. The faster form: **would you still send
-this if they could not reply?** Sequencing, claims, corrections and bug reports pass. These
-fail, always:
-
-- credit, thanks, or acknowledgement
-- agreement that changes nothing
-- "adopted your suggestion"
-- status updates nobody is blocked on
-- relaying something the recipient can already see
-- confirming receipt
-
-**Replies are opt-in.** `--reply none` is the default and the body carries a `[no reply needed]`
-marker. A peer that sends you one is not being curt; answering it costs two turns and buys
-nothing.
-
-### Never narrate peer traffic to Daniel
-
-Do not report what you said to a peer, or what a peer said to you, **unless it changes a
-decision he holds**. Coordination is infrastructure: he sees its results, not its transcript.
-
-This is the rule that most directly buys his attention back, and it is the one sessions break
-while explaining why they should not. On 2026-09-18 two sessions spent an hour messaging each
-other — one relayed something the other had already told him directly, the second messaged back
-to stop the relay, and both then narrated the exchange to him. Four turns of his attention, no
-decision changed. Each message was defensible alone; that is exactly why there is a budget
-rather than a principle.
-
-### You do not have to remember to drain
-
-`claude/hooks/session-coord-mail` runs on every prompt and delivers unread mail straight into
-the turn's context, so mail is read without anyone running a command and without a turn spent
-on the reading. The doorbell still earns its keep, and more clearly: it **wakes a session that
-would not otherwise take a turn for hours**. The hook only removes the case where mail sat
-unread for no reason.
-
-## Sequencing a merge
-
-`pr-merge run` waits minutes for CI and a Copilot review, then mutates shared state in a few seconds at the end: it removes a worktree, deletes two branches, prunes, and fast-forwards the main checkout. Under `strict_required_status_checks` the first merge to land also makes every other open PR stale, so a second session can spend a whole review cycle and then be refused.
-
-**The right fix is a lock around that tail, inside `pr-merge`. It does not exist yet.** What exists is a coarse whole-run lock:
+## Serializing an operation
 
 ```
-session-coord lock merge --owner "infra:11 merging #69" -- pr-merge run 69
-session-coord lock merge --status
+session-coord lock publish --owner "tam-sizing exporting the deck" -- ./export-deck.sh
+session-coord lock publish --status
 ```
 
-Be honest about what that costs, because it is the opposite of the design in `sessioncoord/locks.py`: it holds the lock across the CI wait too, so two merges in one repo run back to back rather than in parallel. On a repo whose CI takes ten minutes that is ten minutes of a second session sitting idle. Use it when two merges would genuinely collide — several PRs landing in one repo in one sitting — and skip it when you are the only session merging, which is most of the time.
-
-`prmerge/` belongs to the `merge-pr` session; taking the lock around only the merge-and-cleanup tail is a change there, not here. Until that lands, do not describe this wrapper as "the tail lock" — it is not, and the gap was caught in review rather than in use.
-
-Exit 75 means another session holds it. That is retryable and is not a merge failure. Report it and wait; never route around it.
+Runs a command under a named per-project lock, so two sessions cannot run the same shared-state operation at once — a merge, a publish, a regeneration of a shared file. Exit 75 means another session holds it: retryable, not a failure. Report it and wait; never route around it.
 
 ## Before this session closes
 
@@ -192,12 +122,12 @@ Exit 75 means another session holds it. That is retryable and is not a merge fai
 session-coord harvest --quiet
 ```
 
-**This is a net, not a verdict.** It narrows a thousand messages to a handful of tags nobody answered or cited; it does not decide whether they matter. Read them. Findings become ticks; unanswered asks either go in the queue or get dissolved. Then release the conductor role if you hold it.
+It scans this session's transcript for tagged items — `[ F-5CSC ]`-style ids for findings, problems, recommendations, asks and questions — that were raised and never answered or cited. **It is a net, not a verdict.** If you do not use tags it will find nothing, and the job is yours by hand: list what this session found or decided that is recorded only in the conversation, and put each somewhere that outlives it — the project's notes, a tracker, or an ask. Then release the conductor role if you hold it.
 
-The reason this step exists: window 8 closed on 2026-09-17 carrying a tick that was done but still open, a contradiction between two sessions neither had seen, and a Workspace change Daniel had made that was recorded nowhere. His words: *"The major work products get captured, but minor details are left dangling, creating hygiene problems."*
+The reason: a session closed carrying a task that was done but still open, a contradiction between two sessions neither had seen, and a change the user had made that was recorded nowhere. *"The major work products get captured, but minor details are left dangling."*
 
 ## When you find a tangle
 
-Escalate early and escalate **once**. Do not hand him a coordination job — that is the mistake that produced this tool. Work out the sequence yourself, name the one thing you need from him, and say plainly what he should do first. If several sessions are involved, message them yourself rather than asking him to carry pastes.
+Escalate early and escalate **once**. Do not hand the user a coordination job — that is the mistake that produced this tool. Work out the sequence yourself, name the one thing you need from them, and say plainly what they should do first. If several sessions are involved, message them yourself rather than asking the user to carry pastes.
 
-The shape that worked, once somebody finally did it: one PR lands everything, two windows close, and his entire part was the word "go".
+The shape that worked, once somebody finally did it: one change landed everything, two sessions closed, and the user's entire part was the word "go".

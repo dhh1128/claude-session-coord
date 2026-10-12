@@ -1,0 +1,88 @@
+# session-coord
+
+A Claude Code plugin for people who run several Claude sessions at once in the same project, and have started to notice them tripping over each other.
+
+It gives the sessions a shared board, so each one knows who else is working here, what they are for and which files they are writing. One session takes the conductor role and sequences the rest. Sessions message each other directly instead of asking you to copy and paste between windows, and they keep one ordered queue of the questions they need you to answer. Everything stays on your machine.
+
+It was built for a heavy multi-session coding workflow and then generalized. It works in a git repo or in a plain folder of research and drafts, with or without tmux, on macOS or Linux.
+
+## What problem it solves
+
+Run three or four sessions in one project and three things go wrong, none of them visible from inside any one session:
+
+- **Two sessions write the same thing.** One overwrites the other's last edit to the shared synthesis, or two sessions put different figures for the same number into adjacent sections, and neither sees the other's.
+- **You become the switchboard.** Every session that hits a question escalates to you, including questions another session could answer, and you spend your time carrying context between windows.
+- **Loose ends die with the window.** A finding or a decision that lived only in one conversation is gone when that session closes.
+
+Each session behaving well does not fix this. It needs a role — someone sequencing — and a channel between sessions that is not you.
+
+## Install
+
+In Claude Code:
+
+```
+/plugin marketplace add dhh1128/claude-session-coord
+/plugin install session-coord@session-coord
+```
+
+Then restart Claude Code, or run `/reload-plugins`. The plugin adds a `session-coord` command to the Bash tool's PATH, a skill of the same name, and four hooks.
+
+Requirements: `python3` 3.9 or later, which macOS already has, and `ps`. git and tmux are optional.
+
+## What happens once it is installed
+
+When only one session is in a project, nothing happens. The hooks print nothing, and that silence is deliberate.
+
+When a second session starts in the same project, it is told about the sessions already there, and the skill tells it how to proceed: name themselves, state their charter, claim the files they will write, and pick a conductor. From then on:
+
+- `session-coord board` shows who is here, what each session is for, and what each has claimed.
+- `session-coord check` reports problems: overlapping claims, sessions sharing a working tree, and no conductor.
+- `session-coord msg <name> "<text>"` leaves a message for another session. It is delivered into that session's context at the start of its next turn.
+- `session-coord ask add` / `ask list` keep the one queue of things you need to answer, in dependency order, each written to stand on its own.
+- In a git repo, a hook refuses `git add`/`commit`/etc. in a working tree another live session is also using, because one session's `git add -A` would sweep up the other's uncommitted work.
+
+### What counts as "the same project"
+
+A git repository, all of its worktrees included. Outside git, the nearest folder above the session that contains a `CLAUDE.md`, a `.claude/` folder or an empty `.session-coord` file. Failing those, the folder the session started in. If two sessions should see each other and don't, `touch .session-coord` in the folder that contains them both.
+
+### With tmux and without it
+
+Under tmux, a message also types a short doorbell into the recipient's prompt. That wakes a session which would otherwise sit idle. Without tmux there is no doorbell. The message waits for the recipient's next turn, so an idle session reads it when you next switch to it. Nothing else differs: sessions are identified by their process rather than their tmux pane.
+
+## Configure
+
+Both settings are optional.
+
+**Your name.** Messages from the tool refer to "the user" by default. To have them use your name, add it to the `env` block of `~/.claude/settings.json`:
+
+```json
+{ "env": { "SESSION_COORD_USER": "Pat" } }
+```
+
+**Your own rules.** The skill is deliberately generic. It knows nothing about your task tracker, your document conventions or your review process. Put your house rules in `~/.config/session-coord/addendum.md`, or point `SESSION_COORD_ADDENDUM` at a file elsewhere. The skill reads that file when it loads and treats it as more specific than itself. For example:
+
+```markdown
+- Research findings go in `findings.md` at the project root, one dated bullet each, with the source URL.
+- The conductor owns `synthesis.md`. Other sessions send it changes by message rather than editing it.
+- Park unfinished threads in Things, project "Research", before closing a session.
+```
+
+This is the intended way to customize it. Fork the repository only to change the mechanics.
+
+## Where it keeps things
+
+`~/.local/state/claude-coord/<project>/` holds one small JSON file per live session, plus the ask queue, the inboxes and lock files. A session's file is removed when the session's process is gone. Nothing is sent anywhere. To start over, delete the directory.
+
+## Uninstall
+
+```
+/plugin uninstall session-coord@session-coord
+```
+
+## Development
+
+```
+uv run --no-project --with pytest python -m pytest tests -q
+```
+
+`skills/session-coord/DESIGN.md` explains why the design is the way it is: the incident that started it, the decisions and the ones that were reversed. Read it before changing behaviour. Most of the odd-looking choices in the code are answers to something that actually went wrong.
