@@ -775,9 +775,9 @@ def cmd_msg(args) -> int:
         return 0
 
     # An unregistered Claude may lack the hook, so successful direct typing remains its best
-    # delivery. A budget refusal or failed send must leave held mail instead of recreating the
-    # hour-long foreman-imbu loss. A successful direct send must not also be filed: that would
-    # put the same message in two turns.
+    # delivery. A failed send to a name can wait for a later registration. Pane and window
+    # addresses can be recycled, so holding mail under either could give it to another process.
+    # A successful direct send must not also be filed: that would put the same message in two turns.
     bell = _Doorbell(repo, sender_id, args.target, reply, override)
     refused = bell.reserve()
     if not refused:
@@ -790,14 +790,18 @@ def cmd_msg(args) -> int:
             print(f"sent to {args.target} ({pane}) -- unregistered, so typed rather than "
                   f"filed{bell.tail()}")
             return 0
+    # A refused send to a tmux address cannot safely become held mail. An empty name also
+    # cannot be matched on a later turn, so report that nothing was filed in either case.
+    key = _held_key(args.target)
+    if (re.fullmatch(r"%\d+|\S+:\d+", args.target) or not key):
+        print(f"session-coord: NOT sent, and nothing was filed -- {args.target!r} has no "
+              f"safe name for held mail: {refused}", file=sys.stderr)
+        return 2
     try:
         inbox_mod.validate(args.text, args.subject or "")
     except inbox_mod.Unsafe as e:
         print(f"session-coord: {e}", file=sys.stderr)
         return 2
-    # `clean_title` removes tmux's status glyph; a literal pane id is not a title and must
-    # retain its `%` so it cannot collide with a session actually named "9".
-    key = args.target.strip() if re.fullmatch(r"%\d+", args.target.strip()) else want
     try:
         with locks.hold(locks.ESTATE, "held", wait=15.0,
                         owner=f"msg from {sender or '?'}"):
@@ -979,10 +983,17 @@ def _you(repo: str, session_id: str) -> str:
             f"{_user()} closes a window, so name sessions, yourself included, by name.")
 
 
+def _held_key(value: str) -> str:
+    """Use the same deliverable name when holding mail and looking for its recipient."""
+    # Claude titles may start with a status glyph, but clean_title removes an entire title
+    # written in non-Latin characters. Keep that title so its held mail can still be found.
+    cleaned = tmuxio.clean_title(value)
+    return cleaned.lower() if cleaned else value.strip().lower()
+
+
 def _held_names(p: Presence) -> set[str]:
     """Names by which held mail can find a session on a later turn."""
-    return {name for name in (tmuxio.clean_title(p.title).lower(),
-                              (p.window or "").lower(), p.session_id.lower(), p.pane) if name}
+    return {name for name in (_held_key(p.title), _held_key(p.session_id)) if name}
 
 
 def cmd_inbox(args) -> int:
@@ -1029,9 +1040,10 @@ def cmd_inbox(args) -> int:
             current = next((p for p in live if p.repo_root == repo and p.session_id == who),
                            None)
             mine_names = _held_names(current) if current else set()
-            # One Claude session can have records in several repos; that is still one
-            # recipient. Count session ids, not presence files, before claiming a name.
-            counts = {name: len({p.session_id for p in live if name in _held_names(p)})
+            # One process can have records in several repos, but a resumed conversation can
+            # have two live processes with the same session id. Count both parts of identity.
+            counts = {name: len({(p.session_id, p.claude_pid) for p in live
+                                 if name in _held_names(p)})
                       for name in mine_names}
             selected = [m for m in held if m.recipient in mine_names
                         and counts[m.recipient] == 1]

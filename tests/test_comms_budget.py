@@ -396,19 +396,19 @@ class TestTheDirectPathIsBudgetedToo:
         assert comms.remaining(store.load_sends("/repo"), "sender",
                                now=time.time()) == comms.BUDGET_PER_HOUR - 1
 
-    def test_over_budget_the_direct_send_is_held_without_typing(
+    def test_over_budget_the_direct_send_is_refused_and_says_nothing_was_filed(
             self, home, fake_world, rings, capsys):
         reg("sender", "%1", 111, "me:1")
         for i in range(comms.BUDGET_PER_HOUR):
             cli.main(["msg", "%9", f"m{i}", "--repo", "/repo"])
         rings.clear()
         capsys.readouterr()
-        # The budget still refuses the interruption, but held mail prevents that refusal from
-        # losing the message when nobody has registered the target yet.
-        assert cli.main(["msg", "%9", "one more", "--repo", "/repo"]) == 0
+        # Refusing here does NOT deliver: there is no inbox for an unregistered target, so the
+        # message is lost rather than delayed, and the refusal has to say so.
+        assert cli.main(["msg", "%9", "one more", "--repo", "/repo"]) == 2
         assert rings == []
-        assert [(m.recipient, m.body) for m in store.load_held()] == [("%9", "one more")]
-        assert "held for %9" in capsys.readouterr().out
+        assert store.load_held() == []
+        assert "nothing was filed" in capsys.readouterr().err
 
 
 class TestOverrideOnAnUnreadableLog:
