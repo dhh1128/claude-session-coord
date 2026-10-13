@@ -614,9 +614,13 @@ def cmd_msg(args) -> int:
     recipient = None
     repo = _resolve_repo(args)
     recipient_repo = repo
-    want = tmuxio.clean_title(args.target).lower()
+    # The same key held mail uses, so a name means one thing whichever path it takes. With
+    # `clean_title` here, "%9 " and "会議A" matched registered sessions titled "9" and "A" --
+    # now that the search spans every repo, a wrong match files private mail across the estate.
+    want = _held_key(args.target)
     matches = lambda p: (args.target in (p.pane, p.window, p.session_id)
-                         or (want and p.title.lower() == want))
+                         or (want and not want.startswith("%")
+                             and _held_key(p.title) == want))
     if repo:
         # EVERY match, not the first one. A window label can name two registered sessions -- a
         # split window is the ordinary way -- and taking the first meant the body was filed into
@@ -793,10 +797,9 @@ def cmd_msg(args) -> int:
     # A refused send to a tmux address cannot safely become held mail. An empty name also
     # cannot be matched on a later turn, so report that nothing was filed in either case.
     key = _held_key(args.target)
-    # Judged on the stripped target, and on its leading `%` rather than a full pane-id match:
-    # "%9 " or "%%9" otherwise slipped past and was held under "9", a name any session can take.
-    addr = args.target.strip()
-    if addr.startswith("%") or re.fullmatch(r"\S+:\d+", addr) or not key:
+    # Judged on the key, which keeps a `%`: "%9 ", "%%9" and "✳ %9" all slipped past checks
+    # on the raw text and were held under "9", a name any session can take.
+    if key.startswith("%") or re.fullmatch(r"\S+:\d+", key) or not key:
         print(f"session-coord: NOT sent, and nothing was filed -- {args.target!r} has no "
               f"safe name for held mail: {refused}", file=sys.stderr)
         return 2
@@ -992,11 +995,12 @@ def _held_key(value: str) -> str:
     # the non-Latin part of a mixed one, so "会議A" and "A" shared a key and one session could
     # read mail held for the other. Here only a leading run of characters that are not letters
     # or digits in any script is removed -- Claude's status glyph and its space -- so the name
-    # itself survives intact and is folded only for case.
+    # itself survives intact. A `%` is kept, so a pane address stays recognisable as one.
+    # `lower`, not `casefold`: casefold maps "Straße" to "strasse", merging two distinct names.
     i = 0
-    while i < len(value) and not value[i].isalnum():
+    while i < len(value) and not (value[i].isalnum() or value[i] == "%"):
         i += 1
-    return value[i:].strip().casefold()
+    return value[i:].strip().lower()
 
 
 def _held_names(p: Presence) -> set[str]:

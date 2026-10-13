@@ -230,3 +230,30 @@ def test_a_status_glyph_on_a_non_latin_name_still_delivers(estate, capsys):
     assert cli.main(["inbox", "--repo", OTHER]) == 0
     assert "meeting note" in capsys.readouterr().out
     assert store.load_held() == []
+
+
+@pytest.mark.parametrize("target,title", [("%9 ", "9"), ("会議A", "A")])
+def test_a_registered_title_is_matched_on_the_held_key(estate, capsys, target, title):
+    # The third pass found the registered path still used `clean_title`, so these filed
+    # straight into the inbox of a session with a different name.
+    hold_budget(estate)
+    peer(title=title)
+    cli.main(["msg", "--repo", SENDER, target, "private note"])
+    assert store.load_inbox(OTHER) == []
+
+
+def test_a_decorated_pane_address_is_never_held(estate, capsys):
+    hold_budget(estate)
+    assert cli.main(["msg", "--repo", SENDER, "✳ %9", "private note"]) == 2
+    assert store.load_held() == []
+
+
+def test_names_that_only_casefold_alike_stay_distinct(estate, capsys):
+    hold_budget(estate)
+    assert cli.main(["msg", "--repo", SENDER, "Straße", "private note"]) == 0
+    peer(title="Strasse")
+    estate.setenv("TMUX_PANE", "%2")
+    capsys.readouterr()
+    assert cli.main(["inbox", "--repo", OTHER]) == 0
+    assert "private note" not in capsys.readouterr().out
+    assert len(store.load_held()) == 1
