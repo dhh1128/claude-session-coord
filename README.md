@@ -47,7 +47,7 @@ A git repository, all of its worktrees included. Outside git, the nearest folder
 
 ### With tmux and without it
 
-Under tmux, a message also types a short doorbell into the recipient's prompt. That wakes a session which would otherwise sit idle. Without tmux there is no doorbell. The message waits for the recipient's next turn, so an idle session reads it when you next switch to it. Nothing else differs: sessions are identified by their process rather than their tmux pane.
+Under tmux, a message also types a short doorbell into the recipient's prompt. That wakes a session which would otherwise sit idle. A peer in another repo receives the message in its own inbox; a name not registered anywhere gets held mail delivered at that session's next turn. The budget only decides whether to ring, never whether to file. Without tmux there is no doorbell. The message waits for the recipient's next turn, so an idle session reads it when you next switch to it. Nothing else differs: sessions are identified by their process rather than their tmux pane.
 
 ## Configure
 

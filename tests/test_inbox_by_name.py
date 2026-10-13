@@ -1,0 +1,259 @@
+"""A message remains deliverable when its recipient is outside the sender's repo or absent."""
+
+from __future__ import annotations
+
+import pytest
+
+from sessioncoord import cli, inbox, store
+from sessioncoord.model import Presence
+
+SENDER = "/sender"
+OTHER = "/other"
+THIRD = "/third"
+
+
+@pytest.fixture
+def estate(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_COORD_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("TMUX_PANE", "%1")
+    monkeypatch.setattr(cli.gitio, "workspace_root", lambda path: path)
+    monkeypatch.setattr(cli.tmuxio, "server_pid", lambda run=None: "999")
+    store.save(Presence(session_id="sender", repo_root=SENDER, workdir=SENDER,
+                        pane="%1", window="sender:1", title="writer",
+                        claude_pid=101, tmux_server="999"))
+    return monkeypatch
+
+
+def peer(repo=OTHER, sid="peer", pane="%2", title="foreman-imbu", window="other:2",
+         pid=102):
+    store.save(Presence(session_id=sid, repo_root=repo, workdir=repo, pane=pane,
+                        window=window, title=title, claude_pid=pid,
+                        tmux_server="999"))
+
+
+def hold_budget(monkeypatch):
+    monkeypatch.setattr(cli._Doorbell, "reserve", lambda self: "budget exhausted")
+
+
+def test_cross_repo_recipient_files_in_its_own_inbox(estate):
+    peer()
+    sent = []
+    estate.setattr(cli.tmuxio, "send", lambda target, text, **kw: sent.append((target, text, kw)) or "%2")
+    assert cli.main(["msg", "--repo", SENDER, "foreman-imbu", "a note"]) == 0
+    assert store.load_inbox(SENDER) == []
+    assert [(m.recipient, m.body) for m in store.load_inbox(OTHER)] == [("peer", "a note")]
+    assert sent[0][0:2] == ("%2", inbox.DOORBELL)
+    assert sent[0][2]["expect_pid"] == 102
+
+
+def test_cross_repo_ambiguity_refuses_with_repos_and_ids(estate, capsys):
+    peer()
+    peer(THIRD, "other-peer", "%3", "foreman-imbu", "third:3")
+    sent = []
+    estate.setattr(cli.tmuxio, "send", lambda *a, **kw: sent.append(a))
+    assert cli.main(["msg", "--repo", SENDER, "foreman-imbu", "a note"]) == 2
+    assert store.load_inbox(OTHER) == store.load_inbox(THIRD) == []
+    assert sent == []
+    err = capsys.readouterr().err
+    assert f"{OTHER}: peer" in err and f"{THIRD}: other-peer" in err
+
+
+def test_unregistered_over_budget_is_held(estate, capsys):
+    hold_budget(estate)
+    estate.setattr(cli.tmuxio, "send", lambda *a, **kw: pytest.fail("budgeted send"))
+    assert cli.main(["msg", "--repo", SENDER, "✳ Foreman-Imbu", "wait for me"]) == 0
+    assert [(m.recipient, m.body) for m in store.load_held()] == [
+        ("foreman-imbu", "wait for me")]
+    assert "held for" in capsys.readouterr().out
+
+
+def test_unregistered_success_is_typed_only(estate):
+    sent = []
+    estate.setattr(cli.tmuxio, "send", lambda target, text, **kw: sent.append(text) or "%9")
+    assert cli.main(["msg", "--repo", SENDER, "%9", "direct note"]) == 0
+    assert "direct note" in sent[0]
+    assert store.load_held() == []
+
+
+@pytest.mark.parametrize("target", ["%9", "other:2"])
+def test_failed_direct_send_to_tmux_address_files_nothing(estate, capsys, target):
+    def refuse(*a, **kw):
+        raise cli.tmuxio.SendRefused("no pane")
+    estate.setattr(cli.tmuxio, "send", refuse)
+    assert cli.main(["msg", "--repo", SENDER, target, "direct note"]) == 2
+    assert store.load_held() == []
+    assert "NOT sent, and nothing was filed" in capsys.readouterr().err
+
+
+def test_inbox_without_held_mail_skips_estate_scan(estate, capsys):
+    estate.setattr(store, "known_repos", lambda: pytest.fail("scanned the estate"))
+    assert not (store.home() / "held.json").exists()
+    assert cli.main(["inbox", "--repo", SENDER]) == 0
+    assert "Inbox empty" in capsys.readouterr().out
+
+
+def test_corrupt_held_mail_does_not_block_own_inbox(estate, capsys):
+    path = store.home() / "held.json"
+    path.write_text("{broken")
+    store.save_inbox(SENDER, [inbox.Message(id="normal", sender="peer",
+                                            recipient="sender", body="normal mail")])
+    assert cli.main(["inbox", "--repo", SENDER]) == 0
+    output = capsys.readouterr()
+    assert "normal mail" in output.out
+    assert len(output.err.splitlines()) == 1
+    assert str(path) in output.err
+    assert path.read_text() == "{broken"
+    assert list(store.home().glob("held.unreadable-*.json")) == []
+
+
+def test_pid_mismatch_to_bare_pane_files_nothing(estate, capsys):
+    def mismatched(target, text, **kw):
+        assert target == "%9" and kw["expect_pid"] == 102
+        raise cli.tmuxio.SendRefused("pane belongs to a different pid")
+
+    estate.setattr(cli.tmuxio, "send", mismatched)
+    assert cli.main(["msg", "--repo", SENDER, "%9", "private note", "--pid", "102"]) == 2
+    assert store.load_held() == []
+    assert "NOT sent, and nothing was filed" in capsys.readouterr().err
+
+
+def test_held_mail_peeks_then_drains_once(estate, capsys):
+    hold_budget(estate)
+    assert cli.main(["msg", "--repo", SENDER, "Foreman-Imbu", "held body"]) == 0
+    capsys.readouterr()
+    peer()
+    estate.setenv("TMUX_PANE", "%2")
+    assert cli.main(["inbox", "--repo", OTHER, "--peek", "--ids"]) == 0
+    first = capsys.readouterr().out
+    assert "held body" in first and first.startswith(cli.IDS_PREFIX)
+    assert len(inbox.unread(store.load_inbox(OTHER), "peer")) == 1
+    assert store.load_held() == []
+    assert cli.main(["inbox", "--repo", OTHER, "--peek"]) == 0
+    assert "held body" in capsys.readouterr().out
+    assert cli.main(["inbox", "--repo", OTHER]) == 0
+    assert "held body" in capsys.readouterr().out
+    assert cli.main(["inbox", "--repo", OTHER]) == 0
+    assert "Inbox empty" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("target", ["foreman-imbu", "peer"])
+def test_held_mail_matches_title_or_session_id(estate, capsys, target):
+    hold_budget(estate)
+    assert cli.main(["msg", "--repo", SENDER, target, "found later"]) == 0
+    peer()
+    estate.setenv("TMUX_PANE", "%2")
+    capsys.readouterr()
+    assert cli.main(["inbox", "--repo", OTHER, "--peek", "--ids"]) == 0
+    out = capsys.readouterr().out
+    assert "found later" in out
+    ids = out.splitlines()[0][len(cli.IDS_PREFIX):]
+    assert cli.main(["inbox", "--repo", OTHER, "--ack", ids]) == 0
+    assert inbox.unread(store.load_inbox(OTHER), "peer") == []
+    assert cli.main(["inbox", "--repo", OTHER]) == 0
+    assert "Inbox empty" in capsys.readouterr().out
+
+
+def test_two_live_sessions_sharing_name_get_nothing(estate, capsys):
+    hold_budget(estate)
+    assert cli.main(["msg", "--repo", SENDER, "foreman-imbu", "private note"]) == 0
+    peer()
+    peer(THIRD, "other-peer", "%3", "foreman-imbu", "third:3")
+    for repo, pane in [(OTHER, "%2"), (THIRD, "%3")]:
+        estate.setenv("TMUX_PANE", pane)
+        assert cli.main(["inbox", "--repo", repo, "--quiet"]) == 0
+        out = capsys.readouterr().out
+        assert "ambiguous" in out and "private note" not in out
+        assert store.load_inbox(repo) == []
+    assert len(store.load_held()) == 1
+
+
+def test_two_processes_with_one_session_id_keep_held_mail_ambiguous(estate, capsys):
+    hold_budget(estate)
+    assert cli.main(["msg", "--repo", SENDER, "foreman-imbu", "private note"]) == 0
+    peer()
+    peer(THIRD, "peer", "%3", "foreman-imbu", "third:3", pid=103)
+    for repo, pane in [(OTHER, "%2"), (THIRD, "%3")]:
+        estate.setenv("TMUX_PANE", pane)
+        assert cli.main(["inbox", "--repo", repo, "--quiet"]) == 0
+        out = capsys.readouterr().out
+        assert "ambiguous" in out and "private note" not in out
+        assert store.load_inbox(repo) == []
+    assert [(m.recipient, m.body) for m in store.load_held()] == [
+        ("foreman-imbu", "private note")]
+
+
+def test_non_latin_name_delivers_held_mail(estate, capsys):
+    hold_budget(estate)
+    assert cli.main(["msg", "--repo", SENDER, "会議", "meeting note"]) == 0
+    assert [(m.recipient, m.body) for m in store.load_held()] == [("会議", "meeting note")]
+    peer(title="会議")
+    estate.setenv("TMUX_PANE", "%2")
+    capsys.readouterr()
+    assert cli.main(["inbox", "--repo", OTHER]) == 0
+    assert "meeting note" in capsys.readouterr().out
+    assert store.load_held() == []
+
+
+def test_empty_held_name_is_refused(estate, capsys):
+    hold_budget(estate)
+    assert cli.main(["msg", "--repo", SENDER, "   ", "private note"]) == 2
+    assert store.load_held() == []
+    assert "NOT sent, and nothing was filed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("target", ["%9 ", " %9", "%%9"])
+def test_a_padded_or_doubled_pane_address_is_never_held(estate, capsys, target):
+    # The fix pass found "%9 " held under "9", which a session titled "9" then read.
+    hold_budget(estate)
+    assert cli.main(["msg", "--repo", SENDER, target, "private note"]) == 2
+    assert store.load_held() == []
+    assert "NOT sent, and nothing was filed" in capsys.readouterr().err
+
+
+def test_a_mixed_script_name_does_not_share_a_key_with_its_latin_tail(estate, capsys):
+    hold_budget(estate)
+    assert cli.main(["msg", "--repo", SENDER, "会議A", "private note"]) == 0
+    peer(title="A")
+    estate.setenv("TMUX_PANE", "%2")
+    capsys.readouterr()
+    assert cli.main(["inbox", "--repo", OTHER]) == 0
+    assert "private note" not in capsys.readouterr().out
+    assert len(store.load_held()) == 1
+
+
+def test_a_status_glyph_on_a_non_latin_name_still_delivers(estate, capsys):
+    hold_budget(estate)
+    assert cli.main(["msg", "--repo", SENDER, "✳ 会議", "meeting note"]) == 0
+    peer(title="会議")
+    estate.setenv("TMUX_PANE", "%2")
+    capsys.readouterr()
+    assert cli.main(["inbox", "--repo", OTHER]) == 0
+    assert "meeting note" in capsys.readouterr().out
+    assert store.load_held() == []
+
+
+@pytest.mark.parametrize("target,title", [("%9 ", "9"), ("会議A", "A")])
+def test_a_registered_title_is_matched_on_the_held_key(estate, capsys, target, title):
+    # The third pass found the registered path still used `clean_title`, so these filed
+    # straight into the inbox of a session with a different name.
+    hold_budget(estate)
+    peer(title=title)
+    cli.main(["msg", "--repo", SENDER, target, "private note"])
+    assert store.load_inbox(OTHER) == []
+
+
+def test_a_decorated_pane_address_is_never_held(estate, capsys):
+    hold_budget(estate)
+    assert cli.main(["msg", "--repo", SENDER, "✳ %9", "private note"]) == 2
+    assert store.load_held() == []
+
+
+def test_names_that_only_casefold_alike_stay_distinct(estate, capsys):
+    hold_budget(estate)
+    assert cli.main(["msg", "--repo", SENDER, "Straße", "private note"]) == 0
+    peer(title="Strasse")
+    estate.setenv("TMUX_PANE", "%2")
+    capsys.readouterr()
+    assert cli.main(["inbox", "--repo", OTHER]) == 0
+    assert "private note" not in capsys.readouterr().out
+    assert len(store.load_held()) == 1

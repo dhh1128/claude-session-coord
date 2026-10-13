@@ -15,8 +15,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
+import uuid
+from contextlib import nullcontext
 from pathlib import Path
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -610,6 +613,14 @@ def cmd_msg(args) -> int:
     expect, target = args.pid, args.target
     recipient = None
     repo = _resolve_repo(args)
+    recipient_repo = repo
+    # The same key held mail uses, so a name means one thing whichever path it takes. With
+    # `clean_title` here, "%9 " and "会議A" matched registered sessions titled "9" and "A" --
+    # now that the search spans every repo, a wrong match files private mail across the estate.
+    want = _held_key(args.target)
+    matches = lambda p: (args.target in (p.pane, p.window, p.session_id)
+                         or (want and not want.startswith("%")
+                             and _held_key(p.title) == want))
     if repo:
         # EVERY match, not the first one. A window label can name two registered sessions -- a
         # split window is the ordinary way -- and taking the first meant the body was filed into
@@ -618,12 +629,20 @@ def cmd_msg(args) -> int:
         # to the wrong session at once. Resolve to exactly one before anything is written.
         # LIVE windows and titles (`_live`): a stored window names whoever held that number
         # when the record was written, which after a close is a different session.
-        want = tmuxio.clean_title(args.target).lower()
-        hits = [p for p in _live(store.load_all(repo))
-                if args.target in (p.pane, p.window, p.session_id)
-                or (want and p.title.lower() == want)]
+        hits = [p for p in _live(store.load_all(repo)) if matches(p)]
+        if not hits:
+            # The foreman-imbu incident lasted an hour because a peer in another repo was
+            # mistaken for an unregistered target, then lost when the direct-send budget ran
+            # out. Keep local resolution first, but search the estate before deciding no inbox
+            # exists. The recipient's repo owns the queue, regardless of the sender's cwd.
+            elsewhere = [(other, p) for other in store.known_repos() if other != repo
+                         for p in _live(store.load_all(other)) if matches(p)]
+            hits = [p for _, p in elsewhere]
+            if len(elsewhere) == 1:
+                recipient_repo = elsewhere[0][0]
         if len(hits) > 1:
-            where = ", ".join(sorted(f"{p.session_id} ({p.pane})" for p in hits))
+            where = ", ".join(sorted(f"{p.repo_root}: {p.session_id} ({p.pane})"
+                                     for p in hits))
             print(f"session-coord: {args.target} names {len(hits)} registered sessions "
                   f"({where}), so it does not name one. Nothing was filed and nothing was "
                   "sent; address a pane id or a session id.", file=sys.stderr)
@@ -692,7 +711,7 @@ def cmd_msg(args) -> int:
     # what turns a busy or unreachable peer into a delay rather than a failure -- before it,
     # three consecutive sends to one peer were refused and the thing that needed saying went
     # nowhere at all.
-    if recipient is not None and repo:
+    if recipient is not None and recipient_repo:
         # Filed mail is read by a terminal exactly as typed mail is, so it is filtered exactly
         # as `tmuxio._clean` filters a direct send -- newlines and tabs allowed, because prose
         # is the point of the queue, and nothing else. Before this the queue was the way AROUND
@@ -703,14 +722,15 @@ def cmd_msg(args) -> int:
             print(f"session-coord: {e}", file=sys.stderr)
             return 2
         try:
-            with locks.hold(repo, "inbox", wait=15.0, owner=f"msg from {sender or '?'}"):
+            with locks.hold(recipient_repo, "inbox", wait=15.0,
+                            owner=f"msg from {sender or '?'}"):
                 try:
-                    queue = store.load_inbox(repo)
+                    queue = store.load_inbox(recipient_repo)
                 except store.UnreadableQueue as e:
                     # Preserve, then proceed. Overwriting would destroy mail nobody has read;
                     # refusing would leave a peer unreachable behind a corrupt file nobody is
                     # looking at. Renaming is the only move that keeps both.
-                    kept = store.quarantine_inbox(repo)
+                    kept = store.quarantine_inbox(recipient_repo)
                     print(f"session-coord: {e}\nMoved it to {kept} and started a fresh inbox; "
                           "nothing in it was lost, but nobody has read it either.",
                           file=sys.stderr)
@@ -721,7 +741,7 @@ def cmd_msg(args) -> int:
                     sender_name=me.name if me else "",
                     body=args.text, created=_now(), subject=args.subject or "",
                     reply=reply)]
-                store.save_inbox(repo, queue)
+                store.save_inbox(recipient_repo, queue)
                 ring = inbox_mod.needs_doorbell(queue, recipient.session_id, _now())
         except locks.Busy as e:
             print(f"session-coord: {e}", file=sys.stderr)
@@ -758,29 +778,61 @@ def cmd_msg(args) -> int:
         print(f"filed for {recipient.label} and rang ({pane}){bell.tail()}")
         return 0
 
-    # No presence record for the target -- an unregistered peer, or a bare pane id. There is no
-    # inbox to file into, so fall back to typing the message itself.
-    #
-    # BUDGETED TOO, and this was a complete bypass before: the limit lived only in the branch
-    # above, so a registered session could interrupt as often as it liked simply by addressing
-    # an unregistered target or a bare pane id. Worse here than there, because this path types
-    # the whole message rather than a doorbell, and nothing is filed -- so refusing means the
-    # message is not delivered at all, and the refusal has to say so.
+    # An unregistered Claude may lack the hook, so successful direct typing remains its best
+    # delivery. A failed send to a name can wait for a later registration. Pane and window
+    # addresses can be recycled, so holding mail under either could give it to another process.
+    # A successful direct send must not also be filed: that would put the same message in two turns.
     bell = _Doorbell(repo, sender_id, args.target, reply, override)
     refused = bell.reserve()
-    if refused:
-        print(f"session-coord: NOT sent, and nothing was filed -- {args.target} is not a "
-              f"registered session, so there is no inbox to leave it in: {refused}",
-              file=sys.stderr)
+    if not refused:
+        try:
+            pane = tmuxio.send(target, comms.compose(args.text, reply), expect_pid=expect,
+                               sender=sender, force=args.force)
+        except tmuxio.SendRefused as e:
+            refused = str(e)
+        else:
+            print(f"sent to {args.target} ({pane}) -- unregistered, so typed rather than "
+                  f"filed{bell.tail()}")
+            return 0
+    # A refused send to a tmux address cannot safely become held mail. An empty name also
+    # cannot be matched on a later turn, so report that nothing was filed in either case.
+    key = _held_key(args.target)
+    # Judged on the key, which keeps a `%`: "%9 ", "%%9" and "✳ %9" all slipped past checks
+    # on the raw text and were held under "9", a name any session can take.
+    if key.startswith("%") or re.fullmatch(r"\S+:\d+", key) or not key:
+        print(f"session-coord: NOT sent, and nothing was filed -- {args.target!r} has no "
+              f"safe name for held mail: {refused}", file=sys.stderr)
         return 2
     try:
-        pane = tmuxio.send(target, comms.compose(args.text, reply), expect_pid=expect,
-                           sender=sender, force=args.force)
-    except tmuxio.SendRefused as e:
+        inbox_mod.validate(args.text, args.subject or "")
+    except inbox_mod.Unsafe as e:
         print(f"session-coord: {e}", file=sys.stderr)
         return 2
-    print(f"sent to {args.target} ({pane}) -- unregistered, so typed rather than "
-          f"filed{bell.tail()}")
+    try:
+        with locks.hold(locks.ESTATE, "held", wait=15.0,
+                        owner=f"msg from {sender or '?'}"):
+            try:
+                queue = store.load_held()
+            except store.UnreadableQueue as e:
+                kept = store.quarantine_held()
+                if kept is None:
+                    print(f"session-coord: {e}\nHeld mail could not be preserved; nothing "
+                          "was filed.", file=sys.stderr)
+                    return 2
+                print(f"session-coord: {e}\nMoved it to {kept} and started fresh held mail; "
+                      "nothing in it was lost, but nobody has read it either.",
+                      file=sys.stderr)
+                queue = []
+            queue.append(inbox_mod.Message(
+                id=f"held-{uuid.uuid4().hex}", sender=sender or "a peer", recipient=key,
+                sender_name=me.name if me else "", body=args.text, created=_now(),
+                subject=args.subject or "", reply=reply))
+            store.save_held(queue)
+    except locks.Busy as e:
+        print(f"session-coord: {e}", file=sys.stderr)
+        return 75
+    print(f"held for {args.target}; it will be delivered at the start of the next turn of "
+          f"a session with that name ({refused})")
     return 0
 
 
@@ -937,6 +989,25 @@ def _you(repo: str, session_id: str) -> str:
             f"{_user()} closes a window, so name sessions, yourself included, by name.")
 
 
+def _held_key(value: str) -> str:
+    """Use the same deliverable name when holding mail and looking for its recipient."""
+    # Not `tmuxio.clean_title`: its ASCII-only rule strips a whole non-Latin title, and strips
+    # the non-Latin part of a mixed one, so "会議A" and "A" shared a key and one session could
+    # read mail held for the other. Here only a leading run of characters that are not letters
+    # or digits in any script is removed -- Claude's status glyph and its space -- so the name
+    # itself survives intact. A `%` is kept, so a pane address stays recognisable as one.
+    # `lower`, not `casefold`: casefold maps "Straße" to "strasse", merging two distinct names.
+    i = 0
+    while i < len(value) and not (value[i].isalnum() or value[i] == "%"):
+        i += 1
+    return value[i:].strip().lower()
+
+
+def _held_names(p: Presence) -> set[str]:
+    """Names by which held mail can find a session on a later turn."""
+    return {name for name in (_held_key(p.title), _held_key(p.session_id)) if name}
+
+
 def cmd_inbox(args) -> int:
     """Drain this session's unread messages.
 
@@ -954,54 +1025,108 @@ def cmd_inbox(args) -> int:
               file=sys.stderr)
         return 2
     try:
-        with locks.hold(repo, "inbox", wait=args.wait, owner="inbox"):
-            try:
-                queue = store.load_inbox(repo)
-            except store.UnreadableQueue as e:
-                # A reader never repairs and never writes. Say what is wrong and where, so the
-                # recipient knows mail may be waiting rather than concluding the inbox is empty.
-                print(f"session-coord: {e}\nYour mail may be in there; nothing was changed.",
-                      file=sys.stderr)
-                return 2
-            mine = inbox_mod.unread(queue, who)
-            # `--ack` acknowledges exactly the messages that were delivered, by id, rather
-            # than "whatever is unread now". The delivery hook reads without clearing, writes
-            # the mail into the turn, and only then acknowledges -- and between those two
-            # calls a peer can file something new. Clearing by recipient would mark that new
-            # message read although it reached nobody: mail lost in the gap between two
-            # processes, which is the same delivery-versus-bookkeeping failure one level out.
-            if args.ack:
-                wanted = {i for spec in args.ack for i in spec.split(",") if i}
-                mine = [m for m in mine if m.id in wanted]
-                if mine:
-                    store.save_inbox(repo, inbox_mod.mark_read(queue, [m.id for m in mine]))
+        held = store.load_held()
+    except store.UnreadableQueue as e:
+        # A damaged shared queue must not prevent this session from reading its own mail.
+        # Only a writer can preserve that queue before replacing it.
+        print(f"session-coord: {e}; held mail was left unchanged.", file=sys.stderr)
+        held = []
+    try:
+        # Most turns have no held mail, so they need only this repo's inbox lock. When mail
+        # exists, re-read it under the estate lock before deciding who receives it.
+        held_lock = (locks.hold(locks.ESTATE, "held", wait=args.wait, owner="inbox")
+                     if held else nullcontext())
+        with held_lock:
+            if held:
+                try:
+                    held = store.load_held()
+                except store.UnreadableQueue as e:
+                    print(f"session-coord: {e}; held mail was left unchanged.", file=sys.stderr)
+                    held = []
+            # Saving the inbox first means a crash between the two writes can repeat a
+            # message, but cannot lose it; the next read recognizes its id and finishes
+            # removing it from held mail. Moving on peek leaves it unread for the hook's
+            # peek-then-ack delivery.
+            live = ([p for other in store.known_repos()
+                     for p in _live(store.load_all(other))] if held else [])
+            current = next((p for p in live if p.repo_root == repo and p.session_id == who),
+                           None)
+            mine_names = _held_names(current) if current else set()
+            # One process can have records in several repos, but a resumed conversation can
+            # have two live processes with the same session id. Count both parts of identity.
+            counts = {name: len({(p.session_id, p.claude_pid) for p in live
+                                 if name in _held_names(p)})
+                      for name in mine_names}
+            selected = [m for m in held if m.recipient in mine_names
+                        and counts[m.recipient] == 1]
+            ambiguous = sorted({m.recipient for m in held if m.recipient in mine_names
+                                and counts[m.recipient] > 1})
+            with locks.hold(repo, "inbox", wait=args.wait, owner="inbox"):
+                try:
+                    queue = store.load_inbox(repo)
+                except store.UnreadableQueue as e:
+                    # A reader never repairs and never writes. Say what is wrong and where, so
+                    # the recipient knows mail may be waiting rather than concluding it is empty.
+                    print(f"session-coord: {e}\nYour mail may be in there; nothing was changed.",
+                          file=sys.stderr)
+                    return 2
+                if selected:
+                    already = {m.id for m in queue}
+                    moved = [replace(m, recipient=who) for m in selected
+                             if m.id not in already]
+                    if moved:
+                        queue = list(queue) + moved
+                        store.save_inbox(repo, queue)
+                    moved_ids = {m.id for m in selected}
+                    store.save_held([m for m in held if m.id not in moved_ids])
+                mine = inbox_mod.unread(queue, who)
+                # `--ack` acknowledges exactly the messages that were delivered, by id, rather
+                # than "whatever is unread now". The delivery hook reads without clearing, writes
+                # the mail into the turn, and only then acknowledges -- and between those two
+                # calls a peer can file something new. Clearing by recipient would mark that new
+                # message read although it reached nobody: mail lost in the gap between two
+                # processes, which is the same delivery-versus-bookkeeping failure one level out.
+                if args.ack:
+                    wanted = {i for spec in args.ack for i in spec.split(",") if i}
+                    mine = [m for m in mine if m.id in wanted]
+                    if mine:
+                        store.save_inbox(repo, inbox_mod.mark_read(queue, [m.id for m in mine]))
+                    if args.ids:
+                        print("\n".join(m.id for m in mine))
+                    return 0
                 if args.ids:
-                    print("\n".join(m.id for m in mine))
-                return 0
-            if args.ids:
-                # ONE SNAPSHOT, under the lock already held. An earlier version had the hook
-                # call this a second time to learn the ids of what it had just read, and those
-                # two peeks were separate processes: a message filed between them appeared in
-                # the id list but not in the bodies, so the acknowledgement marked it read
-                # although it had been delivered to nobody. That is the same defect the
-                # acknowledgement-by-id was introduced to fix, reintroduced by the fix.
-                #
-                # So the ids ride with the bodies, on a sentinel first line the caller strips.
-                # Two peeks cannot be made consistent by trying harder; there has to be one.
-                sys.stdout.write(IDS_PREFIX + " ".join(m.id for m in mine) + "\n")
-                sys.stdout.write(inbox_mod.render(mine, marked_read=False, you=_you(repo, who)))
-                sys.stdout.flush()
-                return 0
-            # Render and WRITE before the queue is marked read, while still holding the lock.
-            # Committing first meant a broken pipe, a closed stdout or an interrupt between the
-            # save and the write left the messages unreadable from the queue although nothing
-            # had been delivered -- the delivery guarantee inverted by its own bookkeeping.
-            if not (args.quiet and not mine):
-                sys.stdout.write(inbox_mod.render(mine, marked_read=bool(mine) and
-                                                  not args.peek, you=_you(repo, who)))
-                sys.stdout.flush()
-            if mine and not args.peek:
-                store.save_inbox(repo, inbox_mod.mark_read(queue, [m.id for m in mine]))
+                    # ONE SNAPSHOT, under the lock already held. An earlier version had the hook
+                    # call this a second time to learn the ids of what it had just read, and those
+                    # two peeks were separate processes: a message filed between them appeared in
+                    # the id list but not in the bodies, so the acknowledgement marked it read
+                    # although it had been delivered to nobody. That is the same defect the
+                    # acknowledgement-by-id was introduced to fix, reintroduced by the fix.
+                    #
+                    # So the ids ride with the bodies, on a sentinel first line the caller strips.
+                    # Two peeks cannot be made consistent by trying harder; there has to be one.
+                    sys.stdout.write(IDS_PREFIX + " ".join(m.id for m in mine) + "\n")
+                    sys.stdout.write(inbox_mod.render(mine, marked_read=False, you=_you(repo, who)))
+                    if ambiguous:
+                        sys.stdout.write("Held mail for " + ", ".join(ambiguous) +
+                                         " is ambiguous across live sessions; nothing was "
+                                         "delivered for that name.\n")
+                    sys.stdout.flush()
+                    return 0
+                # Render and WRITE before the queue is marked read, while still holding the lock.
+                # Committing first meant a broken pipe, a closed stdout or an interrupt between the
+                # save and the write left the messages unreadable from the queue although nothing
+                # had been delivered -- the delivery guarantee inverted by its own bookkeeping.
+                if not (args.quiet and not mine):
+                    sys.stdout.write(inbox_mod.render(mine, marked_read=bool(mine) and
+                                                      not args.peek, you=_you(repo, who)))
+                if ambiguous:
+                    sys.stdout.write("Held mail for " + ", ".join(ambiguous) +
+                                     " is ambiguous across live sessions; nothing was "
+                                     "delivered for that name.\n")
+                if mine or ambiguous:
+                    sys.stdout.flush()
+                if mine and not args.peek:
+                    store.save_inbox(repo, inbox_mod.mark_read(queue, [m.id for m in mine]))
     except locks.Busy as e:
         print(f"session-coord: {e}", file=sys.stderr)
         return 75

@@ -407,6 +407,7 @@ class TestTheDirectPathIsBudgetedToo:
         # message is lost rather than delayed, and the refusal has to say so.
         assert cli.main(["msg", "%9", "one more", "--repo", "/repo"]) == 2
         assert rings == []
+        assert store.load_held() == []
         assert "nothing was filed" in capsys.readouterr().err
 
 

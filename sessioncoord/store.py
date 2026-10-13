@@ -331,6 +331,53 @@ def save_inbox(repo_root: str, messages: Iterable[Message]) -> Path:
     return path
 
 
+def _held_path() -> Path:
+    return home() / "held.json"
+
+
+def load_held() -> list[Message]:
+    """Estate-wide mail for names that had no registered recipient when it was sent."""
+    path = _held_path()
+    if not path.is_file():
+        return []
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, ValueError) as e:
+        raise UnreadableQueue(f"{path} could not be read: {e}") from e
+    if not isinstance(raw, list):
+        raise UnreadableQueue(f"{path} is not a list of messages; refusing to act on it.")
+    out = []
+    for d in raw:
+        if not isinstance(d, dict):
+            continue
+        try:
+            out.append(Message.from_dict(d))
+        except (TypeError, AttributeError, KeyError):
+            continue
+    return out
+
+
+def quarantine_held() -> Path | None:
+    """Preserve unreadable held mail before a writer starts a fresh queue."""
+    path = _held_path()
+    if not path.exists():
+        return None
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    dest = path.with_name(f"held.unreadable-{stamp}.json")
+    try:
+        path.replace(dest)
+    except OSError:
+        return None
+    return dest
+
+
+def save_held(messages: Iterable[Message]) -> Path:
+    """Replace held mail. Callers MUST hold the estate `held` lock across load and save."""
+    path = _held_path()
+    _write_atomic(path, json.dumps([m.to_dict() for m in messages], indent=2, sort_keys=True))
+    return path
+
+
 class UnreadableSends(RuntimeError):
     """The doorbell budget log exists but could not be read."""
 
