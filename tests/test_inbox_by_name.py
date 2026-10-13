@@ -199,3 +199,34 @@ def test_empty_held_name_is_refused(estate, capsys):
     assert cli.main(["msg", "--repo", SENDER, "   ", "private note"]) == 2
     assert store.load_held() == []
     assert "NOT sent, and nothing was filed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("target", ["%9 ", " %9", "%%9"])
+def test_a_padded_or_doubled_pane_address_is_never_held(estate, capsys, target):
+    # The fix pass found "%9 " held under "9", which a session titled "9" then read.
+    hold_budget(estate)
+    assert cli.main(["msg", "--repo", SENDER, target, "private note"]) == 2
+    assert store.load_held() == []
+    assert "NOT sent, and nothing was filed" in capsys.readouterr().err
+
+
+def test_a_mixed_script_name_does_not_share_a_key_with_its_latin_tail(estate, capsys):
+    hold_budget(estate)
+    assert cli.main(["msg", "--repo", SENDER, "会議A", "private note"]) == 0
+    peer(title="A")
+    estate.setenv("TMUX_PANE", "%2")
+    capsys.readouterr()
+    assert cli.main(["inbox", "--repo", OTHER]) == 0
+    assert "private note" not in capsys.readouterr().out
+    assert len(store.load_held()) == 1
+
+
+def test_a_status_glyph_on_a_non_latin_name_still_delivers(estate, capsys):
+    hold_budget(estate)
+    assert cli.main(["msg", "--repo", SENDER, "✳ 会議", "meeting note"]) == 0
+    peer(title="会議")
+    estate.setenv("TMUX_PANE", "%2")
+    capsys.readouterr()
+    assert cli.main(["inbox", "--repo", OTHER]) == 0
+    assert "meeting note" in capsys.readouterr().out
+    assert store.load_held() == []

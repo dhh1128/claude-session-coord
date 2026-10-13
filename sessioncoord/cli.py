@@ -793,7 +793,10 @@ def cmd_msg(args) -> int:
     # A refused send to a tmux address cannot safely become held mail. An empty name also
     # cannot be matched on a later turn, so report that nothing was filed in either case.
     key = _held_key(args.target)
-    if (re.fullmatch(r"%\d+|\S+:\d+", args.target) or not key):
+    # Judged on the stripped target, and on its leading `%` rather than a full pane-id match:
+    # "%9 " or "%%9" otherwise slipped past and was held under "9", a name any session can take.
+    addr = args.target.strip()
+    if addr.startswith("%") or re.fullmatch(r"\S+:\d+", addr) or not key:
         print(f"session-coord: NOT sent, and nothing was filed -- {args.target!r} has no "
               f"safe name for held mail: {refused}", file=sys.stderr)
         return 2
@@ -985,10 +988,15 @@ def _you(repo: str, session_id: str) -> str:
 
 def _held_key(value: str) -> str:
     """Use the same deliverable name when holding mail and looking for its recipient."""
-    # Claude titles may start with a status glyph, but clean_title removes an entire title
-    # written in non-Latin characters. Keep that title so its held mail can still be found.
-    cleaned = tmuxio.clean_title(value)
-    return cleaned.lower() if cleaned else value.strip().lower()
+    # Not `tmuxio.clean_title`: its ASCII-only rule strips a whole non-Latin title, and strips
+    # the non-Latin part of a mixed one, so "会議A" and "A" shared a key and one session could
+    # read mail held for the other. Here only a leading run of characters that are not letters
+    # or digits in any script is removed -- Claude's status glyph and its space -- so the name
+    # itself survives intact and is folded only for case.
+    i = 0
+    while i < len(value) and not value[i].isalnum():
+        i += 1
+    return value[i:].strip().casefold()
 
 
 def _held_names(p: Presence) -> set[str]:
