@@ -127,7 +127,8 @@ def is_codex_headless(argv: list[str] | None) -> bool:
     if not is_codex(argv):
         return False
     subcommand = 2 if os.path.basename(argv[0]) == "node" else 1
-    return len(argv) > subcommand and argv[subcommand] == "exec"
+    args = argv[subcommand:]
+    return "exec" in args[:args.index("--") if "--" in args else len(args)]
 
 
 def claude_ancestor(pid: int | None = None) -> int | None:

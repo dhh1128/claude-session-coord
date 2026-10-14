@@ -22,9 +22,10 @@ from __future__ import annotations
 from typing import Iterable, Mapping
 
 from .model import Presence
+from .tmuxio import UNKNOWN_PID, _UnknownPid
 
 # None = could not look. {} = looked, nobody there. The distinction is load-bearing.
-PaneMap = "Mapping[str, int | None] | None"
+PaneMap = "Mapping[str, int | None | _UnknownPid] | None"
 
 
 # pid -> start fingerprint (None for a pid that is gone). None as a whole = could not look.
@@ -55,7 +56,8 @@ def is_live(p: Presence, pane_claude_pids: PaneMap, server: str | None = None,
             return False
         if p.claude_pid is None:
             return False
-        return pane_claude_pids.get(p.pane) == p.claude_pid
+        observed = pane_claude_pids.get(p.pane)
+        return observed is UNKNOWN_PID or observed == p.claude_pid
     if p.claude_pid is None or not p.pid_started:
         # Headless runs, and records that carry neither proof, cannot be placed. Treating them
         # as live would let an unplaceable record warn real sessions forever.

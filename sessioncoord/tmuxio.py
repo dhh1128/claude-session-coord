@@ -106,6 +106,13 @@ class Unknown(Exception):
     """We were refused sight of a process. Distinct from having looked and found nothing."""
 
 
+class _UnknownPid:
+    """A per-pane observation failure, distinct from an empty pane."""
+
+
+UNKNOWN_PID = _UnknownPid()
+
+
 def _is_claude(pid: int) -> bool:
     """True/False when we could look; raises Unknown when we were not allowed to.
 
@@ -148,6 +155,17 @@ def _argv_of(pid: int) -> list[str] | None:
     return procio.argv_of(pid)
 
 
+def _pid_exited(pid: int) -> bool:
+    """True only when /proc confirms a vanished process, not when access was refused."""
+    try:
+        os.stat(f"/proc/{pid}")
+    except FileNotFoundError:
+        return True
+    except OSError:
+        pass
+    return False
+
+
 def codex_under(pane_pid: int, kids: dict[int, list[int]]) -> "int | None":
     """Prefer the native child of the npm launcher, as a hook sees that ancestor."""
     seen: set[int] = set()
@@ -160,6 +178,8 @@ def codex_under(pane_pid: int, kids: dict[int, list[int]]) -> "int | None":
         seen.add(pid)
         argv = _argv_of(pid)
         if argv is None:
+            if _pid_exited(pid):
+                continue
             raise Unknown(f"cannot read argv of {pid}")
         if procio.is_codex(argv):
             if os.path.basename(argv[0]) == "codex":
@@ -213,9 +233,17 @@ def panes(run: Runner = _run) -> dict[str, dict] | None:
         pane, window, pane_pid, path = parts
         try:
             claude = claude_under(int(pane_pid), kids)
-            codex = None if claude is not None else codex_under(int(pane_pid), kids)
         except (ValueError, Unknown):
             return None
+        if claude is not None:
+            codex = None
+        else:
+            try:
+                codex = codex_under(int(pane_pid), kids)
+            except Unknown:
+                result[pane] = {"pane": pane, "window": window, "path": path,
+                                "claude_pid": UNKNOWN_PID, "engine": None, "title": title}
+                continue
         result[pane] = {"pane": pane, "window": window, "path": path,
                         "claude_pid": claude if claude is not None else codex,
                         "engine": ("claude" if claude is not None else
@@ -249,7 +277,7 @@ def pane_of_title(title: str, run: Runner = _run) -> str | None:
     return hits[0] if hits else None
 
 
-def claude_pids(run: Runner = _run) -> dict[str, int | None] | None:
+def claude_pids(run: Runner = _run) -> dict[str, int | None | _UnknownPid] | None:
     """The liveness map, or None when tmux could not be consulted. See `liveness.PaneMap`."""
     table = panes(run)
     if table is None:
@@ -305,6 +333,30 @@ PROMPT_GLYPH = "❯"
 CODEX_PROMPT_GLYPH = "›"
 
 
+def _codex_prompt_state(pane: str, run: Runner = _run) -> str | None:
+    """Return idle, typed, working, or unknown from one visible Codex screen."""
+    out = run(["tmux", "capture-pane", "-p", "-e", "-t", pane])
+    if out is None:
+        return None
+    lines = out.splitlines()
+    prompt = next((i for i in range(len(lines) - 1, -1, -1)
+                   if _typed_text(lines[i]).strip().startswith(CODEX_PROMPT_GLYPH)), None)
+    if prompt is None:
+        return None
+    rest = _typed_text(lines[prompt]).strip()[len(CODEX_PROMPT_GLYPH):].strip()
+    if rest:
+        return "typed"
+    visible = [_visible_text(line).strip() for line in lines[:prompt]]
+    for line in reversed(visible):
+        if re.match(r"^•\s+Working\s*\(", line):
+            return "working"
+        if re.search(r"\bWorked for\b", line):
+            return "idle"
+        if re.match(r"^•\s+(?:Ran|Running|Called|Failed|Waiting)\b", line):
+            return None  # a tool card with no visible turn status is not proof of idle
+    return "idle" if any("OpenAI Codex" in line for line in visible) else None
+
+
 def prompt_is_busy(pane: str, run: Runner = _run, engine: str = "claude") -> "bool | None":
     """Is the target already holding text somebody typed and has not submitted?
 
@@ -322,20 +374,12 @@ def prompt_is_busy(pane: str, run: Runner = _run, engine: str = "claude") -> "bo
     # repos carried one ("low stakes, quick check and merge"), so every message to them was
     # refused or left un-rung as "somebody is typing", and he was told to press Enter on
     # sentences he had never written.
+    if engine == "codex":
+        state = _codex_prompt_state(pane, run)
+        return None if state is None else state != "idle"
     out = run(["tmux", "capture-pane", "-p", "-e", "-t", pane])
     if out is None:
         return None
-    if engine == "codex":
-        lines = out.splitlines()
-        prompt = next((i for i in range(len(lines) - 1, -1, -1)
-                       if _typed_text(lines[i]).strip().startswith(CODEX_PROMPT_GLYPH)), None)
-        if prompt is None:
-            return None
-        visible = [_visible_text(line).strip() for line in lines[max(0, prompt - 8):prompt]]
-        if any(re.match(r"^•\s+Working\s*\(", line) for line in visible):
-            return True
-        rest = _typed_text(lines[prompt]).strip()[len(CODEX_PROMPT_GLYPH):].strip()
-        return bool(rest)
     for line in reversed(out.splitlines()):
         stripped = _typed_text(line).strip()
         if stripped.startswith(PROMPT_GLYPH):
@@ -532,11 +576,15 @@ def send(target: str, text: str, run: Runner = _run, expect_pid: int | None = No
             raise SendRefused(f"no pane matches {target!r}; nothing was sent.")
         live = table[pane]["claude_pid"]
         engine = table[pane].get("engine", "claude")
+        if live is UNKNOWN_PID:
+            raise SendRefused(f"{target} process could not be read; nothing was sent.")
         if live is None:
             raise SendRefused(
                 f"{target} holds no Claude session or Codex session -- it is a plain shell, and "
                 "sending would execute the message as a command. Nothing was sent."
             )
+        if engine not in ("claude", "codex"):
+            raise SendRefused(f"{target} engine could not be read; nothing was sent.")
         if expect_pid is not None and live != expect_pid:
             raise SendRefused(
                 f"{target} now holds session pid {live}, not the {expect_pid} this message was "
@@ -562,10 +610,12 @@ def send(target: str, text: str, run: Runner = _run, expect_pid: int | None = No
     # change under us, and failing closed there would silently kill inter-session messaging on
     # the next Claude Code release -- a worse outcome than an occasional collision, which the
     # attribution prefix at least makes legible. Refuse only on a positive observation.
-    busy = (prompt_is_busy(pane, run, engine=engine) if engine == "codex"
-            else prompt_is_busy(pane, run))
-    if not force and engine == "codex" and busy is None:
+    state = _codex_prompt_state(pane, run) if engine == "codex" else None
+    busy = (None if state is None else state != "idle") if engine == "codex" else prompt_is_busy(pane, run)
+    if not force and engine == "codex" and state is None:
         raise SendRefused(f"{target} Codex prompt could not be read; nothing was sent.")
+    if not force and state == "working":
+        raise SendRefused(f"{target} is working on a turn; nothing was typed. Retry when it is idle.")
     if not force and busy is True:
         raise SendRefused(
             f"{target} has unsubmitted text in its prompt -- somebody is typing there. Sending "

@@ -20,13 +20,13 @@ def hook_block(runtime: Path) -> str:
     entries = (
         ("SessionStart", "session-coord-codex-register", None, 15),
         ("UserPromptSubmit", "session-coord-mail", None, 20),
-        ("PreToolUse", "session-coord-gate", "Bash", 15),
+        ("PreToolUse", "session-coord-gate", "", 15),
         ("SessionEnd", "session-coord-codex-end", None, 3),
     )
     lines = [START]
     for event, script, matcher, timeout in entries:
         lines += [f"[[hooks.{event}]]"]
-        if matcher:
+        if matcher is not None:
             lines += [f"matcher = {_toml_string(matcher)}"]
         lines += [f"[[hooks.{event}.hooks]]", 'type = "command"',
                   f"command = {_toml_string(str(hooks / script))}", f"timeout = {timeout}", ""]
