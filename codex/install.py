@@ -56,6 +56,11 @@ def install(config: Path, skills: Path, runtime: Path) -> None:
         for part in ("sessioncoord", "bin", "hooks"):
             shutil.copytree(ROOT / part, staged / part,
                             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        for directory in (path for path in staged.rglob("*") if path.is_dir()):
+            target_dir = runtime / directory.relative_to(staged)
+            if target_dir.is_symlink():
+                raise ValueError(f"runtime directory {target_dir} is a symlink; refusing to "
+                                 "write through it")
         runtime.mkdir(parents=True, exist_ok=True)
         skill = skills / "session-coord"
         skill.mkdir(parents=True, exist_ok=True)

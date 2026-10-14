@@ -58,6 +58,8 @@ def test_codex_ancestor_walks_through_guarded_wrapper(monkeypatch):
     (["/opt/bin/codex", "-C", "review"], False),
     (["/opt/bin/codex", "--model", "review", "reply OK"], False),
     (["/opt/bin/codex", "--cd=review", "reply OK"], False),
+    (["/opt/bin/codex", "--image", "one.png", "two.png", "--model", "x", "exec"], True),
+    (["/opt/bin/codex", "-i", "review", "two.png", "--model", "x", "reply OK"], False),
     (["/opt/bin/codex", "--", "review"], False),
     (["/opt/bin/codex", "--dangerously-bypass-approvals-and-sandbox", "prompt"], False),
 ])
@@ -275,13 +277,13 @@ def test_session_start_hook_registers_a_forked_thread(monkeypatch, tmp_path):
     assert calls and "thread-1" in calls[0]
 
 
-@pytest.mark.parametrize("subcommand", ["e", "review"])
-def test_session_start_hook_ignores_other_one_shot_commands(monkeypatch, tmp_path,
-                                                              subcommand):
+@pytest.mark.parametrize("args", [["e"], ["review"],
+                                  ["--image", "one.png", "two.png", "--model", "x", "exec"]])
+def test_session_start_hook_ignores_other_one_shot_commands(monkeypatch, tmp_path, args):
     module = runpy.run_path(str(ROOT / "hooks" / "session-coord-codex-register"),
                             run_name="codex_test")
     monkeypatch.setattr(procio, "codex_ancestor", lambda: 1234)
-    monkeypatch.setattr(procio, "argv_of", lambda pid: ["/opt/bin/codex", subcommand])
+    monkeypatch.setattr(procio, "argv_of", lambda pid: ["/opt/bin/codex", *args])
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({
         "session_id": "thread-1", "cwd": str(tmp_path), "source": "startup"})))
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("registered one-shot"))
@@ -396,6 +398,22 @@ def test_installer_keeps_skills_inside_runtime(tmp_path):
     codex_install.install(config, skills, runtime)
     codex_install.install(config, skills, runtime)
     assert (skills / "session-coord" / "SKILL.md").exists()
+
+
+@pytest.mark.parametrize("part,file", [("hooks", "session-coord-gate"),
+                                         ("sessioncoord", "procio.py")])
+def test_installer_refuses_runtime_directory_symlinks(tmp_path, part, file):
+    config = tmp_path / "config.toml"
+    runtime = tmp_path / "runtime"
+    outside = tmp_path / "outside"
+    runtime.mkdir()
+    outside.mkdir()
+    (outside / file).write_text("untouched")
+    (runtime / part).symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        codex_install.install(config, tmp_path / "skills", runtime)
+    assert (outside / file).read_text() == "untouched"
+    assert not config.exists()
 
 
 def test_installer_quotes_absolute_runtime_and_toml_controls(tmp_path, monkeypatch):

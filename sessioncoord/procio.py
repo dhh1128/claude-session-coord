@@ -139,6 +139,13 @@ def is_codex_headless(argv: list[str] | None) -> bool:
         arg = args[i]
         if arg == "--":
             return False
+        if (arg in ("-i", "--image") or arg.startswith("--image=")
+                or (arg.startswith("-i") and len(arg) > 2)):
+            # The global image option accepts multiple file paths up to the next option.
+            i += 1
+            while i < len(args) and not args[i].startswith("-"):
+                i += 1
+            continue
         if arg in value_options:
             i += 2
             continue
