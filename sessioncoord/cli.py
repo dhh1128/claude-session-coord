@@ -270,7 +270,11 @@ def _register_locked(args, repo: str) -> int:
         # update in SKILL.md omits it, so this path is the common one, and a null pid makes
         # the next sweep treat a running session as dead.
         claude_pid=args.pid if args.pid is not None else (
-            inherited.claude_pid if inherited else procio.claude_ancestor()),
+            inherited.claude_pid if inherited else (
+                procio.codex_ancestor() if getattr(args, "engine", None) == "codex"
+                else procio.claude_ancestor())),
+        engine=(args.engine if getattr(args, "engine", None)
+                else (inherited.engine if inherited else "claude")),
         charter=args.charter or (inherited.charter if inherited else ""),
         claims=tuple(args.claim) if args.claim else (inherited.claims if inherited else ()),
         role=inherited.role if inherited else None,
@@ -907,12 +911,15 @@ def _mine_by_pid(records) -> Presence | None:
     Matched on pid AND start time, so a record left behind by a process whose pid has since
     been recycled cannot be mistaken for this session.
     """
-    pid = procio.claude_ancestor()
-    if pid is None:
-        return None
-    started = procio.start_of(pid)
-    return next((p for p in records if not p.pane and p.claude_pid == pid
-                 and started and p.pid_started == started), None)
+    for pid in (procio.claude_ancestor(), procio.codex_ancestor()):
+        if pid is None:
+            continue
+        started = procio.start_of(pid)
+        found = next((p for p in records if not p.pane and p.claude_pid == pid
+                      and started and p.pid_started == started), None)
+        if found:
+            return found
+    return None
 
 
 def _me_anywhere(repo: str | None) -> Presence | None:
@@ -1178,6 +1185,7 @@ def build_parser() -> argparse.ArgumentParser:
     reg.add_argument("--pane")
     reg.add_argument("--window")
     reg.add_argument("--pid", type=int)
+    reg.add_argument("--engine", choices=("claude", "codex"))
     reg.add_argument("--cwd")
     reg.add_argument("--charter", help="one paragraph: what this session is for")
     reg.add_argument("--claim", action="append", help="a path or glob this session will edit")

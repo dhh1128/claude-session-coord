@@ -112,6 +112,24 @@ def is_claude(argv: list[str] | None) -> bool:
     return False
 
 
+def is_codex(argv: list[str] | None) -> bool:
+    """Recognise the native Codex binary and its official npm launcher."""
+    if not argv:
+        return False
+    if os.path.basename(argv[0]) == "codex":
+        return True
+    return (os.path.basename(argv[0]) == "node" and len(argv) > 1
+            and "/@openai/codex/bin/codex.js" in argv[1])
+
+
+def is_codex_headless(argv: list[str] | None) -> bool:
+    """`codex exec` is a one-shot child, not a conversation occupying the pane."""
+    if not is_codex(argv):
+        return False
+    subcommand = 2 if os.path.basename(argv[0]) == "node" else 1
+    return len(argv) > subcommand and argv[subcommand] == "exec"
+
+
 def claude_ancestor(pid: int | None = None) -> int | None:
     """The nearest `claude` process above `pid` (default: this process), or None."""
     pid = os.getpid() if pid is None else pid
@@ -120,6 +138,19 @@ def claude_ancestor(pid: int | None = None) -> int | None:
         if ppid is None or ppid <= 1:
             return None
         if is_claude(argv_of(ppid)):
+            return ppid
+        pid = ppid
+    return None
+
+
+def codex_ancestor(pid: int | None = None) -> int | None:
+    """The nearest actual Codex process, skipping a guarded shell wrapper."""
+    pid = os.getpid() if pid is None else pid
+    for _ in range(16):
+        ppid = parent_of(pid)
+        if ppid is None or ppid <= 1:
+            return None
+        if is_codex(argv_of(ppid)):
             return ppid
         pid = ppid
     return None

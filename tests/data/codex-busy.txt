@@ -1,0 +1,7 @@
+[2m[38;2;128;128;128m•[0m  [2mWorking (1m 41s • esc to interrupt)[0m
+  └ Tip: Use /agents to open the agent command center.
+
+›  [2mAsk Codex to do anything[0m
+
+  GPT-6-Sol high · ~/code/me/claude-session-coord/.worktrees/codex-coord · Build Codex session adapter
+  ? for shortcuts

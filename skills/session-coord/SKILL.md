@@ -1,11 +1,11 @@
 ---
 name: session-coord
-description: Coordinate with the other Claude Code sessions working in this project — see who else is here and what they are doing, claim the files you will write, claim or hand off the conductor role that sequences them, file a question into the one queue the user reads, message a peer session directly instead of asking the user to carry a paste, and harvest loose ends before a session closes. Use when the session-start notice reports peers, when you are about to write a file another session claims, when you would otherwise ask the user to relay something between sessions, when two sessions' work needs sequencing or their conclusions conflict, or when this session is finishing. Mechanics live in the `session-coord` command; this skill holds the judgement.
+description: Coordinate with the other Claude Code or Codex sessions working in this project — see who else is here and what they are doing, claim the files you will write, claim or hand off the conductor role that sequences them, file a question into the one queue the user reads, message a peer session directly instead of asking the user to carry a paste, and harvest loose ends before a session closes. Use when the session-start notice reports peers, when you are about to write a file another session claims, when you would otherwise ask the user to relay something between sessions, when two sessions' work needs sequencing or their conclusions conflict, or when this session is finishing. Mechanics live in the `session-coord` command; this skill holds the judgement.
 ---
 
 # Coordinating with the other sessions in this project
 
-The plugin's hooks already register you at session start, deliver peer mail at the start of each turn, refuse a git staging command in a working tree another live session shares, and look for loose ends when a session closes. This skill is for the parts that need judgement.
+The installed hooks register you at session start, deliver peer mail at the start of each turn, and refuse a git staging command in a working tree another live session shares. Claude's close hook also looks for loose ends; Codex's close hook removes its presence record. This skill is for the parts that need judgement.
 
 **First, once per session: run `session-coord addendum`.** If it prints anything, those are this machine's local rules — the user's own trackers, conventions and pipelines — and where they are more specific than this file, they win.
 
@@ -49,7 +49,7 @@ session-coord register --name "tam-sizing" \
 
 ## In a git repo: one working tree per session
 
-When peers share a git repo, each session should work in its own worktree: `git worktree add <repo>/.worktrees/<topic> -b <topic> origin/main`, then move the *session* there with the **`EnterWorktree`** tool, not with `cd`. The gate is handed the session's directory, so a shell `cd` leaves you looking, to the gate, like a session still sitting in the shared checkout — refused, and shown a remedy you think you have already followed.
+When peers share a git repo, each session should work in its own worktree: `git worktree add <repo>/.worktrees/<topic> -b <topic> origin/main`, then move the *session* there. In Claude Code use the **`EnterWorktree`** tool, not a shell `cd`. In Codex, start the session in the worktree and register there. The gate is handed the session's directory, so a shell `cd` leaves you looking, to the gate, like a session still sitting in the shared checkout — refused, and shown a remedy you think you have already followed.
 
 If you need to commit into a different repository from the one the session started in, use `git -C /literal/path …` with a literal path. The gate checks only the tree a single `-C` names; with `cd X && git …`, or a path held in a shell variable, it cannot be sure where the write lands and checks your session's own tree as well.
 
@@ -93,7 +93,7 @@ session-coord msg "legal-memo" "tam-sizing here. The TAM figure in drafts/market
 
 **Name sessions by name**, quoted if it has spaces. The body is filed in the recipient's inbox, including when that peer is in another repo, and a hook delivers it into their context at the start of their next turn. A name not registered anywhere gets held mail delivered at that session's next turn; the budget only decides whether to ring, never whether to file. A busy peer is a delay, never a failure, and the message can be prose of any length.
 
-Under tmux, a short doorbell (` >>> session-coord inbox`) is also typed into the peer's prompt, which wakes a session that would otherwise sit idle. Outside tmux there is no doorbell: the message waits for that session's next turn, and an idle session reads it when the user next switches to it. If a peer needs to act *now* and is idle, that is the one case to tell the user, in one line: "switch to *legal-memo*; it has a message that changes its section 3."
+Under tmux, a short doorbell (` >>> session-coord inbox`) is also typed into the peer's prompt, which wakes a session that would otherwise sit idle. A Codex pane is rung only when its `›` input is visibly idle; an unreadable Codex prompt leaves the mail filed for its next turn. Outside tmux there is no doorbell: the message waits for that session's next turn, and an idle session reads it when the user next switches to it. If a peer needs to act *now* and is idle, that is the one case to tell the user, in one line: "switch to *legal-memo*; it has a message that changes its section 3."
 
 Say who you are in the message. Do **not** use messages to poll peers for opinions.
 
