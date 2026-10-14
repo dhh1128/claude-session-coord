@@ -134,7 +134,11 @@ def is_codex_headless(argv: list[str] | None) -> bool:
                      "-C", "--cd", "--add-dir", "-a", "--ask-for-approval"}
     short_values = {opt for opt in value_options if opt.startswith("-") and
                     not opt.startswith("--")}
-    headless = {"exec", "e", "review"}
+    headless = {"agents", "exec", "e", "review", "login", "logout", "mcp",
+                "plugin", "app-server", "remote-control", "completion", "update",
+                "doctor", "sandbox", "debug", "apply", "a", "queue", "archive",
+                "delete", "migrate-rollouts", "unarchive", "cloud", "exec-server",
+                "features", "help"}
     i = 0
     while i < len(args):
         arg = args[i]

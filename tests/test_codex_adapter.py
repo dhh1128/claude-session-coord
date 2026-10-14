@@ -66,6 +66,14 @@ def test_codex_ancestor_walks_through_guarded_wrapper(monkeypatch):
     (["/opt/bin/codex", "-i", "review", "two.png", "--model", "x", "reply OK"], False),
     (["/opt/bin/codex", "--", "review"], False),
     (["/opt/bin/codex", "--dangerously-bypass-approvals-and-sandbox", "prompt"], False),
+    (["/opt/bin/codex", "apply", "latest"], True),
+    (["/opt/bin/codex", "a", "latest"], True),
+    (["/opt/bin/codex", "sandbox", "linux"], True),
+    (["/opt/bin/codex", "doctor"], True),
+    (["/opt/bin/codex", "app-server"], True),
+    (["/opt/bin/codex", "exec-server"], True),
+    (["/opt/bin/codex", "resume", "--last"], False),
+    (["/opt/bin/codex", "fork", "--last"], False),
 ])
 def test_headless_codex_is_not_a_session(argv, want):
     assert procio.is_codex_headless(argv) is want
@@ -76,6 +84,7 @@ def test_codex_pane_discovers_native_child_after_node_wrapper(monkeypatch):
     monkeypatch.setattr(tmuxio, "_children", lambda: kids)
     monkeypatch.setattr(tmuxio, "_is_claude", lambda pid: False)
     monkeypatch.setattr(tmuxio, "_argv_of", lambda pid: {
+        10: ["/bin/bash"],
         20: ["node", "/opt/lib/node_modules/@openai/codex/bin/codex.js"],
         30: ["/opt/lib/vendor/bin/codex"],
     }.get(pid))
@@ -103,6 +112,12 @@ def test_codex_busy_fixture_overrides_empty_input():
     assert tmuxio.prompt_is_busy("%3", lambda argv: screen, engine="codex") is True
 
 
+def test_visible_working_line_overrides_nearer_completed_line():
+    screen = ("• Working (12s • esc to interrupt)\nWorked for 1m 2s\n"
+              "›  \x1b[2mAsk Codex to do anything\x1b[0m\n")
+    assert tmuxio.prompt_is_busy("%3", lambda argv: screen, engine="codex") is True
+
+
 def test_codex_busy_line_beyond_eight_rows_is_not_idle():
     screen = "• Working (12s • esc to interrupt)\n" + ("detail\n" * 20) + "›  \x1b[2mAsk Codex to do anything\x1b[0m\n"
     assert tmuxio.prompt_is_busy("%3", lambda argv: screen, engine="codex") is True
@@ -115,16 +130,27 @@ def test_codex_with_no_visible_activity_state_is_unknown():
 
 def test_exited_grandchild_does_not_hide_all_panes(monkeypatch):
     monkeypatch.setattr(tmuxio, "_argv_of", lambda pid: {
+        10: ["/bin/bash"],
         20: ["node", "/opt/node_modules/@openai/codex/bin/codex.js"],
         30: ["/opt/bin/codex"], 40: None}.get(pid))
     monkeypatch.setattr(tmuxio, "_pid_exited", lambda pid: pid == 40)
     assert tmuxio.codex_under(10, {10: [20], 20: [40, 30]}) == 30
 
 
+def test_codex_pane_process_wins_over_one_shot_child(monkeypatch):
+    monkeypatch.setattr(tmuxio, "_argv_of", lambda pid: {
+        30: ["/opt/bin/codex"], 40: ["/opt/bin/codex", "exec", "one-shot"]}.get(pid))
+    assert tmuxio.codex_under(30, {30: [40]}) == 30
+    peer = Presence(session_id="peer", repo_root="/repo", workdir="/repo",
+                    pane="%3", claude_pid=30, title="peer", window="probe:1")
+    assert liveness.is_live(peer, {"%3": tmuxio.codex_under(30, {30: [40]})})
+
+
 def test_unreadable_process_is_unknown_for_its_pane_only(monkeypatch):
     monkeypatch.setattr(tmuxio, "_children", lambda: {10: [40], 11: [50]})
     monkeypatch.setattr(tmuxio, "_is_claude", lambda pid: False)
     monkeypatch.setattr(tmuxio, "_argv_of", lambda pid: {
+        10: ["/bin/bash"], 11: ["/bin/bash"],
         40: None, 50: ["/opt/bin/codex"]}.get(pid))
     monkeypatch.setattr(tmuxio, "_pid_exited", lambda pid: False)
     def run(argv):
@@ -163,10 +189,13 @@ def test_idle_codex_receives_literal_doorbell(monkeypatch):
                "title": "codex-coord", "claude_pid": 30, "engine": "codex"}
     })
     screen = codex_screen("idle")
+    working = "• Working (1s • esc to interrupt)\n›  \x1b[2mAsk Codex to do anything\x1b[0m\n"
     calls = []
     def run(argv):
         calls.append(argv)
-        return screen if argv[1] == "capture-pane" else "ok"
+        if argv[1] == "capture-pane":
+            return screen if sum(call[1] == "capture-pane" for call in calls) == 1 else working
+        return "ok"
     assert tmuxio.send("%3", "session-coord inbox", run, expect_pid=30) == "%3"
     sends = [argv for argv in calls if argv[1] == "send-keys"]
     assert sends[0][:6] == ["tmux", "send-keys", "-t", "%3", "-l", "--"]
@@ -182,6 +211,7 @@ def test_codex_retries_enter_once_when_paste_remains(monkeypatch, clears_after_r
                "title": "codex-coord", "claude_pid": 30, "engine": "codex"}
     })
     idle = codex_screen("idle")
+    working = "• Working (1s • esc to interrupt)\n›  \x1b[2mAsk Codex to do anything\x1b[0m\n"
     calls = []
     typed = None
     enters = 0
@@ -196,8 +226,10 @@ def test_codex_retries_enter_once_when_paste_remains(monkeypatch, clears_after_r
                 enters += 1
             return "ok"
         if argv[1] == "capture-pane":
-            if enters == 0 or (enters == 2 and clears_after_retry):
+            if enters == 0:
                 return idle
+            if enters == 2 and clears_after_retry:
+                return working
             return f"  >_ OpenAI Codex (v0.161.0)\n\n› {typed}\n"
         return "ok"
 
@@ -211,6 +243,42 @@ def test_codex_retries_enter_once_when_paste_remains(monkeypatch, clears_after_r
     assert sum(argv[1] == "capture-pane" for argv in calls) == 3
     assert all("-J" in argv for argv in calls if argv[1] == "capture-pane" and
                argv != calls[0])
+
+
+def test_codex_stale_empty_capture_is_unknown(monkeypatch):
+    monkeypatch.setattr(tmuxio, "panes", lambda run=None: {
+        "%3": {"pane": "%3", "window": "probe:1", "path": "/repo",
+               "title": "codex-coord", "claude_pid": 30, "engine": "codex"}
+    })
+    idle = codex_screen("idle")
+    calls = []
+    def run(argv):
+        calls.append(argv)
+        return idle if argv[1] == "capture-pane" else "ok"
+    with pytest.raises(tmuxio.SendUnknown, match="unknown"):
+        tmuxio.send("%3", "session-coord inbox", run)
+    assert sum(argv[1] == "send-keys" and argv[-1] == "Enter" for argv in calls) == 1
+
+
+def test_codex_dim_sent_text_is_still_pending(monkeypatch):
+    monkeypatch.setattr(tmuxio, "panes", lambda run=None: {
+        "%3": {"pane": "%3", "window": "probe:1", "path": "/repo",
+               "title": "codex-coord", "claude_pid": 30, "engine": "codex"}
+    })
+    idle = codex_screen("idle")
+    calls = []
+    typed = ""
+    def run(argv):
+        nonlocal typed
+        calls.append(argv)
+        if argv[1] == "send-keys" and "-l" in argv:
+            typed = argv[-1]
+        if argv[1] == "capture-pane":
+            return idle if not typed else f"  >_ OpenAI Codex\n›  \x1b[2m{typed}\x1b[0m\n"
+        return "ok"
+    with pytest.raises(tmuxio.SendUnknown, match="unknown"):
+        tmuxio.send("%3", "session-coord inbox", run)
+    assert sum(argv[1] == "send-keys" and argv[-1] == "Enter" for argv in calls) == 2
 
 
 def test_codex_does_not_submit_a_different_composer(monkeypatch):
@@ -236,7 +304,8 @@ def test_working_codex_keeps_doorbell_untyped(monkeypatch):
         "%3": {"pane": "%3", "window": "probe:1", "path": "/repo",
                "title": "codex-coord", "claude_pid": 30, "engine": "codex"}
     })
-    screen = codex_screen("busy")
+    screen = ("• Working (12s • esc to interrupt)\nWorked for 1m 2s\n"
+              "›  \x1b[2mAsk Codex to do anything\x1b[0m\n")
     calls = []
     def run(argv):
         calls.append(argv)
@@ -282,6 +351,8 @@ def test_session_start_hook_registers_a_forked_thread(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("args", [["e"], ["review"],
+                                  ["apply"], ["a"], ["sandbox"], ["doctor"],
+                                  ["app-server"], ["exec-server"],
                                   ["--image", "one.png", "two.png", "--model", "x", "exec"],
                                   ["--image=one.png", "exec", "--help"],
                                   ["--image=/etc/hosts", "/etc/hosts", "exec", "--help"]])

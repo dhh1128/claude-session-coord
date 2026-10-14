@@ -167,9 +167,9 @@ def _pid_exited(pid: int) -> bool:
 
 
 def codex_under(pane_pid: int, kids: dict[int, list[int]]) -> "int | None":
-    """Prefer the native child of the npm launcher, as a hook sees that ancestor."""
+    """Prefer the nearest interactive native Codex process, including the pane pid itself."""
     seen: set[int] = set()
-    queue = list(kids.get(int(pane_pid), []))
+    queue = [int(pane_pid)]
     launcher = None
     while queue:
         pid = queue.pop(0)
@@ -182,6 +182,8 @@ def codex_under(pane_pid: int, kids: dict[int, list[int]]) -> "int | None":
                 continue
             raise Unknown(f"cannot read argv of {pid}")
         if procio.is_codex(argv):
+            if procio.is_codex_headless(argv):
+                continue
             if os.path.basename(argv[0]) == "codex":
                 return pid
             launcher = pid
@@ -347,13 +349,13 @@ def _codex_prompt_state(pane: str, run: Runner = _run) -> str | None:
                    if _typed_text(lines[i]).strip().startswith(CODEX_PROMPT_GLYPH)), None)
     if prompt is None:
         return None
+    visible = [_visible_text(line).strip() for line in lines[:prompt]]
+    if any(re.match(r"^•\s+Working\s*\(", line) for line in visible):
+        return "working"
     rest = _typed_text(lines[prompt]).strip()[len(CODEX_PROMPT_GLYPH):].strip()
     if rest:
         return "typed"
-    visible = [_visible_text(line).strip() for line in lines[:prompt]]
     for line in reversed(visible):
-        if re.match(r"^•\s+Working\s*\(", line):
-            return "working"
         if re.search(r"\bWorked for\b", line):
             return "idle"
         if re.match(r"^•\s+(?:Ran|Running|Called|Failed|Waiting)\b", line):
@@ -362,7 +364,7 @@ def _codex_prompt_state(pane: str, run: Runner = _run) -> str | None:
 
 
 def _codex_composer_after_send(pane: str, text: str, run: Runner) -> str | None:
-    """Return clear, pending, or unknown for the exact text we just typed.
+    """Return submitted, pending, or unknown for the exact text we just typed.
 
     `-J` joins terminal-wrapped rows, so a long single-line paste can be compared to the
     original text. A different typed sentence is unknown, not an invitation to submit it.
@@ -370,13 +372,20 @@ def _codex_composer_after_send(pane: str, text: str, run: Runner) -> str | None:
     out = run(["tmux", "capture-pane", "-p", "-e", "-J", "-t", pane])
     if out is None:
         return None
-    for line in reversed(out.splitlines()):
+    lines = out.splitlines()
+    for index in range(len(lines) - 1, -1, -1):
+        line = lines[index]
         stripped = _typed_text(line).strip()
         if stripped.startswith(CODEX_PROMPT_GLYPH):
             rest = stripped[len(CODEX_PROMPT_GLYPH):].strip()
-            if not rest:
-                return "clear"
-            return "pending" if rest == text.strip() else None
+            visible = _visible_text(line).strip()
+            visible_rest = visible[len(CODEX_PROMPT_GLYPH):].strip()
+            if rest or visible_rest == text.strip():
+                return "pending" if rest == text.strip() or visible_rest == text.strip() else None
+            activity = [_visible_text(row).strip() for row in lines[:index]]
+            if any(re.match(r"^•\s+Working\s*\(", row) for row in activity):
+                return "submitted"
+            return None  # an unchanged idle screen may precede the paste being painted
     return None
 
 
@@ -662,7 +671,7 @@ def send(target: str, text: str, run: Runner = _run, expect_pid: int | None = No
                 raise SendUnknown(f"send outcome unknown for {pane}: the second submit keystroke "
                                   "failed after the text remained in Codex's composer.")
             composer = _codex_composer_after_send(pane, text, run)
-        if composer != "clear":
+        if composer != "submitted":
             raise SendUnknown(f"send outcome unknown for {pane}: Codex's composer did not "
                               "confirm that the text was submitted. Do not resend automatically.")
     return pane
