@@ -123,12 +123,13 @@ def is_codex(argv: list[str] | None) -> bool:
 
 
 def is_codex_headless(argv: list[str] | None) -> bool:
-    """`codex exec` is a one-shot child, not a conversation occupying the pane."""
+    """One-shot Codex commands do not occupy the pane as peer sessions."""
     if not is_codex(argv):
         return False
     subcommand = 2 if os.path.basename(argv[0]) == "node" else 1
     args = argv[subcommand:]
-    return "exec" in args[:args.index("--") if "--" in args else len(args)]
+    return any(arg in ("exec", "e", "review") for arg in
+               args[:args.index("--") if "--" in args else len(args)])
 
 
 def claude_ancestor(pid: int | None = None) -> int | None:

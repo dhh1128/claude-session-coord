@@ -3,6 +3,7 @@
 import json
 import io
 import runpy
+import shlex
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,7 @@ import pytest
 from sessioncoord import cli, liveness, procio, tmuxio
 from sessioncoord.tmuxio import SendRefused
 from sessioncoord.model import Presence
+from codex import install as codex_install
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -50,6 +52,9 @@ def test_codex_ancestor_walks_through_guarded_wrapper(monkeypatch):
     (["node", "/opt/node_modules/@openai/codex/bin/codex.js", "exec", "one-shot"], True),
     (["/opt/bin/codex", "--dangerously-bypass-approvals-and-sandbox", "exec", "one-shot"], True),
     (["node", "/opt/node_modules/@openai/codex/bin/codex.js", "--dangerously-bypass-approvals-and-sandbox", "exec", "one-shot"], True),
+    (["/opt/bin/codex", "e", "one-shot"], True),
+    (["/opt/bin/codex", "review", "--uncommitted"], True),
+    (["node", "/opt/node_modules/@openai/codex/bin/codex.js", "review", "--uncommitted"], True),
     (["/opt/bin/codex", "--dangerously-bypass-approvals-and-sandbox", "prompt"], False),
 ])
 def test_headless_codex_is_not_a_session(argv, want):
@@ -266,6 +271,19 @@ def test_session_start_hook_registers_a_forked_thread(monkeypatch, tmp_path):
     assert calls and "thread-1" in calls[0]
 
 
+@pytest.mark.parametrize("subcommand", ["e", "review"])
+def test_session_start_hook_ignores_other_one_shot_commands(monkeypatch, tmp_path,
+                                                              subcommand):
+    module = runpy.run_path(str(ROOT / "hooks" / "session-coord-codex-register"),
+                            run_name="codex_test")
+    monkeypatch.setattr(procio, "codex_ancestor", lambda: 1234)
+    monkeypatch.setattr(procio, "argv_of", lambda pid: ["/opt/bin/codex", subcommand])
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({
+        "session_id": "thread-1", "cwd": str(tmp_path), "source": "startup"})))
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("registered one-shot"))
+    assert module["main"]() == 0
+
+
 def test_codex_pretool_payload_reaches_shared_tree_gate(tmp_path):
     hooks = tmp_path / "hooks"
     binary = tmp_path / "bin"
@@ -311,3 +329,36 @@ def test_installer_is_idempotent_and_preserves_existing_config(tmp_path):
     parsed = tomllib.loads(once)
     assert parsed["hooks"]["UserPromptSubmit"][0]["hooks"][0]["type"] == "command"
     assert parsed["hooks"]["PreToolUse"][-1]["matcher"] == ""
+
+
+def test_failed_reinstall_keeps_active_gate(tmp_path, monkeypatch):
+    config = tmp_path / "config.toml"
+    runtime = tmp_path / "runtime"
+    codex_install.install(config, tmp_path / "skills", runtime)
+    before = config.read_bytes()
+    gate = runtime / "hooks" / "session-coord-gate"
+    gate_before = gate.read_bytes()
+    original = codex_install.shutil.copytree
+
+    def fail_hooks(src, dst, *args, **kwargs):
+        if Path(src).name == "hooks":
+            raise OSError("simulated copy failure")
+        return original(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(codex_install.shutil, "copytree", fail_hooks)
+    with pytest.raises(OSError, match="simulated copy failure"):
+        codex_install.install(config, tmp_path / "skills", runtime)
+    assert gate.read_bytes() == gate_before
+    assert config.read_bytes() == before
+
+
+def test_installer_quotes_absolute_runtime_and_toml_controls(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runtime = Path("relative runtime\nname\x7f")
+    parsed = tomllib.loads(codex_install.hook_block(runtime))
+    for event, script in (("SessionStart", "session-coord-codex-register"),
+                          ("UserPromptSubmit", "session-coord-mail"),
+                          ("PreToolUse", "session-coord-gate"),
+                          ("SessionEnd", "session-coord-codex-end")):
+        command = parsed["hooks"][event][0]["hooks"][0]["command"]
+        assert shlex.split(command) == [str((tmp_path / runtime / "hooks" / script).resolve())]
