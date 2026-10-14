@@ -55,6 +55,10 @@ def test_codex_ancestor_walks_through_guarded_wrapper(monkeypatch):
     (["/opt/bin/codex", "e", "one-shot"], True),
     (["/opt/bin/codex", "review", "--uncommitted"], True),
     (["node", "/opt/node_modules/@openai/codex/bin/codex.js", "review", "--uncommitted"], True),
+    (["/opt/bin/codex", "-C", "review"], False),
+    (["/opt/bin/codex", "--model", "review", "reply OK"], False),
+    (["/opt/bin/codex", "--cd=review", "reply OK"], False),
+    (["/opt/bin/codex", "--", "review"], False),
     (["/opt/bin/codex", "--dangerously-bypass-approvals-and-sandbox", "prompt"], False),
 ])
 def test_headless_codex_is_not_a_session(argv, want):
@@ -284,6 +288,20 @@ def test_session_start_hook_ignores_other_one_shot_commands(monkeypatch, tmp_pat
     assert module["main"]() == 0
 
 
+def test_session_start_hook_accepts_review_as_directory_name(monkeypatch, tmp_path):
+    module = runpy.run_path(str(ROOT / "hooks" / "session-coord-codex-register"),
+                            run_name="codex_test")
+    monkeypatch.setattr(procio, "codex_ancestor", lambda: 1234)
+    monkeypatch.setattr(procio, "argv_of", lambda pid: ["/opt/bin/codex", "-C", "review"])
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({
+        "session_id": "thread-1", "cwd": str(tmp_path), "source": "startup"})))
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: (
+        calls.append(argv) or SimpleNamespace(returncode=0, stdout="")))
+    assert module["main"]() == 0
+    assert calls and "thread-1" in calls[0]
+
+
 def test_codex_pretool_payload_reaches_shared_tree_gate(tmp_path):
     hooks = tmp_path / "hooks"
     binary = tmp_path / "bin"
@@ -350,6 +368,34 @@ def test_failed_reinstall_keeps_active_gate(tmp_path, monkeypatch):
         codex_install.install(config, tmp_path / "skills", runtime)
     assert gate.read_bytes() == gate_before
     assert config.read_bytes() == before
+
+
+def test_interrupted_reinstall_never_removes_gate(tmp_path, monkeypatch):
+    config = tmp_path / "config.toml"
+    runtime = tmp_path / "runtime"
+    codex_install.install(config, tmp_path / "skills", runtime)
+    gate = runtime / "hooks" / "session-coord-gate"
+    original = codex_install.os.replace
+
+    def interrupt_at_hook(src, dst):
+        if Path(dst) == runtime / "hooks" / "session-coord-codex-register":
+            raise KeyboardInterrupt("simulated termination")
+        return original(src, dst)
+
+    monkeypatch.setattr(codex_install.os, "replace", interrupt_at_hook)
+    with pytest.raises(KeyboardInterrupt, match="simulated termination"):
+        codex_install.install(config, tmp_path / "skills", runtime)
+    assert gate.exists()
+    assert (runtime / "hooks" / "session-coord-codex-register").exists()
+
+
+def test_installer_keeps_skills_inside_runtime(tmp_path):
+    config = tmp_path / "config.toml"
+    runtime = tmp_path / "runtime"
+    skills = runtime / "skills"
+    codex_install.install(config, skills, runtime)
+    codex_install.install(config, skills, runtime)
+    assert (skills / "session-coord" / "SKILL.md").exists()
 
 
 def test_installer_quotes_absolute_runtime_and_toml_controls(tmp_path, monkeypatch):

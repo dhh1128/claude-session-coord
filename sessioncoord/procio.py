@@ -128,8 +128,29 @@ def is_codex_headless(argv: list[str] | None) -> bool:
         return False
     subcommand = 2 if os.path.basename(argv[0]) == "node" else 1
     args = argv[subcommand:]
-    return any(arg in ("exec", "e", "review") for arg in
-               args[:args.index("--") if "--" in args else len(args)])
+    value_options = {"-c", "--config", "--enable", "--disable", "--remote",
+                     "--remote-auth-token-env", "-i", "--image", "-m", "--model",
+                     "--local-provider", "-p", "--profile", "-s", "--sandbox",
+                     "-C", "--cd", "--add-dir", "-a", "--ask-for-approval"}
+    short_values = {opt for opt in value_options if opt.startswith("-") and
+                    not opt.startswith("--")}
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            return False
+        if arg in value_options:
+            i += 2
+            continue
+        if (any(arg.startswith(opt + "=") for opt in value_options if opt.startswith("--"))
+                or any(arg.startswith(opt) and len(arg) > len(opt) for opt in short_values)):
+            i += 1
+            continue
+        if arg.startswith("-"):
+            i += 1
+            continue
+        return arg in ("exec", "e", "review")
+    return False
 
 
 def claude_ancestor(pid: int | None = None) -> int | None:

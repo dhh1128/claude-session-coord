@@ -53,36 +53,25 @@ def install(config: Path, skills: Path, runtime: Path) -> None:
     runtime.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=f".{runtime.name}-install-", dir=runtime.parent) as tmp:
         staged = Path(tmp) / "runtime"
-        backup = Path(tmp) / "previous"
-        if runtime.exists():
-            shutil.copytree(runtime, staged)
-        else:
-            staged.mkdir()
         for part in ("sessioncoord", "bin", "hooks"):
-            target = staged / part
-            if target.exists():
-                shutil.rmtree(target)
-            shutil.copytree(ROOT / part, target,
+            shutil.copytree(ROOT / part, staged / part,
                             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        runtime.mkdir(parents=True, exist_ok=True)
         skill = skills / "session-coord"
         skill.mkdir(parents=True, exist_ok=True)
         for name in ("SKILL.md", "DESIGN.md"):
             shutil.copy2(ROOT / "skills" / "session-coord" / name, skill / name)
-        had_runtime = runtime.exists()
-        if had_runtime:
-            os.replace(runtime, backup)
-        try:
-            os.replace(staged, runtime)
-            if not config.exists() or config.read_text() != new:
-                temporary = config.with_name(config.name + ".session-coord-tmp")
-                temporary.write_text(new)
-                os.replace(temporary, config)
-        except Exception:
-            if runtime.exists():
-                os.replace(runtime, Path(tmp) / "failed")
-            if had_runtime:
-                os.replace(backup, runtime)
-            raise
+        # Replace files one at a time. An interrupted reinstall may leave mixed versions,
+        # but no hook path disappears between two directory renames.
+        for source in sorted(staged.rglob("*")):
+            if source.is_file():
+                target = runtime / source.relative_to(staged)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(source, target)
+        if not config.exists() or config.read_text() != new:
+            temporary = config.with_name(config.name + ".session-coord-tmp")
+            temporary.write_text(new)
+            os.replace(temporary, config)
 
 
 def main() -> None:
