@@ -147,6 +147,17 @@ class TestMsgFilesThenRings:
         assert [x.body for x in store.load_inbox(REPO)] == ["important"]
         assert "could not be rung" in capsys.readouterr().err
 
+    def test_an_unconfirmed_codex_doorbell_is_reported_unknown(self, two_sessions,
+                                                                 monkeypatch, capsys):
+        def unknown(t, x, **kw):
+            raise cli.tmuxio.SendUnknown("composer still holds the doorbell")
+        monkeypatch.setattr(cli.tmuxio, "send", unknown)
+        assert cli.main(["msg", "--repo", REPO, "me:7", "important"]) == 0
+        assert [x.body for x in store.load_inbox(REPO)] == ["important"]
+        err = capsys.readouterr().err
+        assert "doorbell outcome unknown" in err
+        assert "could not be rung" not in err
+
     def test_an_unregistered_target_is_still_typed_directly(self, two_sessions, monkeypatch):
         # No inbox to file into, so fall back to the old behaviour rather than dropping it.
         sent = {}

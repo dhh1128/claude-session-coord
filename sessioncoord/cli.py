@@ -112,6 +112,9 @@ def _live(records, table=None):
             out.append(p)
             continue
         info = table.get(p.pane or "")
+        if info and info["claude_pid"] is tmuxio.UNKNOWN_PID:
+            out.append(p)
+            continue
         if info and (p.claude_pid is None or info["claude_pid"] == p.claude_pid):
             p = p.with_(window=info["window"], title=info.get("title") or p.title)
         else:
@@ -255,6 +258,23 @@ def _register_locked(args, repo: str) -> int:
         store.remove(repo, old.session_id)
     inherited = prior or (superseded[0] if superseded else None)
 
+    detected_engine, detected_pid = None, None
+    if not inherited and (args.pid is None or not getattr(args, "engine", None)):
+        detected_pid = procio.claude_ancestor()
+        if detected_pid is not None:
+            detected_engine = "claude"
+        else:
+            detected_pid = procio.codex_ancestor()
+            if detected_pid is not None:
+                detected_engine = "codex"
+    engine = (getattr(args, "engine", None) or
+              (inherited.engine if inherited else detected_engine) or "claude")
+    session_pid = (args.pid if args.pid is not None else
+                   (inherited.claude_pid if inherited else
+                    (detected_pid if detected_engine == engine else
+                     (procio.codex_ancestor() if engine == "codex"
+                      else procio.claude_ancestor()))))
+
     cwd = os.path.realpath(os.path.expanduser(args.cwd or os.getcwd()))
     p = Presence(
         session_id=args.session,
@@ -269,8 +289,8 @@ def _register_locked(args, repo: str) -> int:
         # A re-register without --pid must not blank the pid. The documented charter/claim
         # update in SKILL.md omits it, so this path is the common one, and a null pid makes
         # the next sweep treat a running session as dead.
-        claude_pid=args.pid if args.pid is not None else (
-            inherited.claude_pid if inherited else procio.claude_ancestor()),
+        claude_pid=session_pid,
+        engine=engine,
         charter=args.charter or (inherited.charter if inherited else ""),
         claims=tuple(args.claim) if args.claim else (inherited.claims if inherited else ()),
         role=inherited.role if inherited else None,
@@ -278,7 +298,7 @@ def _register_locked(args, repo: str) -> int:
         updated=_now(),
         transcript=args.transcript or (inherited.transcript if inherited else ""),
         tmux_server=(server or "") if pane else "",
-        pid_started=_pid_started(args.pid, inherited),
+        pid_started=_pid_started(session_pid, inherited),
     )
     try:
         store.save(p)
@@ -771,6 +791,10 @@ def cmd_msg(args) -> int:
         try:
             pane = tmuxio.send(target, inbox_mod.DOORBELL, expect_pid=expect, sender="",
                                force=args.force, spill_over=0)
+        except tmuxio.SendUnknown as e:
+            print(f"filed for {recipient.label}; doorbell outcome unknown: {e}",
+                  file=sys.stderr)
+            return 0
         except tmuxio.SendRefused as e:
             print(f"filed for {recipient.label}, but the doorbell could not be rung: {e}",
                   file=sys.stderr)
@@ -788,6 +812,11 @@ def cmd_msg(args) -> int:
         try:
             pane = tmuxio.send(target, comms.compose(args.text, reply), expect_pid=expect,
                                sender=sender, force=args.force)
+        except tmuxio.SendUnknown as e:
+            # Typing may have delivered this turn. Holding a second copy would risk duplication.
+            print(f"session-coord: send outcome unknown; nothing was filed: {e}",
+                  file=sys.stderr)
+            return 2
         except tmuxio.SendRefused as e:
             refused = str(e)
         else:
@@ -907,12 +936,15 @@ def _mine_by_pid(records) -> Presence | None:
     Matched on pid AND start time, so a record left behind by a process whose pid has since
     been recycled cannot be mistaken for this session.
     """
-    pid = procio.claude_ancestor()
-    if pid is None:
-        return None
-    started = procio.start_of(pid)
-    return next((p for p in records if not p.pane and p.claude_pid == pid
-                 and started and p.pid_started == started), None)
+    for pid in (procio.claude_ancestor(), procio.codex_ancestor()):
+        if pid is None:
+            continue
+        started = procio.start_of(pid)
+        found = next((p for p in records if not p.pane and p.claude_pid == pid
+                      and started and p.pid_started == started), None)
+        if found:
+            return found
+    return None
 
 
 def _me_anywhere(repo: str | None) -> Presence | None:
@@ -1178,6 +1210,7 @@ def build_parser() -> argparse.ArgumentParser:
     reg.add_argument("--pane")
     reg.add_argument("--window")
     reg.add_argument("--pid", type=int)
+    reg.add_argument("--engine", choices=("claude", "codex"))
     reg.add_argument("--cwd")
     reg.add_argument("--charter", help="one paragraph: what this session is for")
     reg.add_argument("--claim", action="append", help="a path or glob this session will edit")
@@ -1314,6 +1347,11 @@ def _fill_session(args) -> None:
     me = _me(repo) if repo else None
     if me is not None:
         args.session = me.session_id
+    elif args.cmd == "register" and procio.codex_ancestor() is not None:
+        # A Codex worker whose hook has not yet registered can still name itself from the
+        # thread id exported to its tool environment. The pid and start time are detected by
+        # register below; the environment supplies only the session id.
+        args.session = os.environ.get("CODEX_SESSION_ID") or os.environ.get("CODEX_THREAD_ID")
 
 
 def main(argv: list[str] | None = None) -> int:

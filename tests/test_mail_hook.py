@@ -99,6 +99,19 @@ class TestDelivery:
         assert spec["hookEventName"] == "UserPromptSubmit"
         assert "the gate is fixed" in spec["additionalContext"]
 
+    def test_codex_user_prompt_payload_delivers_the_same_envelope(self, tree):
+        fake_cli(tree, body="peer says unblock the review\n")
+        codex_payload = json.dumps({
+            "session_id": "thread-123", "cwd": str(tree),
+            "hook_event_name": "UserPromptSubmit", "turn_id": "turn-456",
+            "prompt": "reply OK", "permission_mode": "bypassPermissions",
+        })
+        out = run(tree, codex_payload)
+        assert out.returncode == 0
+        spec = json.loads(out.stdout)["hookSpecificOutput"]
+        assert spec["hookEventName"] == "UserPromptSubmit"
+        assert "unblock the review" in spec["additionalContext"]
+
     def test_tells_the_reader_it_was_not_interrupted(self, tree):
         fake_cli(tree, body="mail\n")
         ctx = json.loads(run(tree, ok_payload(tree)).stdout)["hookSpecificOutput"][

@@ -1,6 +1,6 @@
 # session-coord
 
-A Claude Code plugin for people who run several Claude sessions at once in the same project, and have started to notice them tripping over each other.
+A Claude Code plugin with a Codex CLI adapter for people who run several agent sessions at once in the same project, and have started to notice them tripping over each other.
 
 It gives the sessions a shared board, so each one knows who else is working here, what they are for and which files they are writing. One session takes the conductor role and sequences the rest. Sessions message each other directly instead of asking you to copy and paste between windows, and they keep one ordered queue of the questions they need you to answer. Everything stays on your machine.
 
@@ -28,6 +28,12 @@ In Claude Code:
 Then restart Claude Code, or run `/reload-plugins`. The plugin adds a `session-coord` command to the Bash tool's PATH, a skill of the same name, and four hooks.
 
 Requirements: `python3` 3.9 or later, which macOS already has, and `ps`. git and tmux are optional.
+
+### Codex CLI
+
+From a checkout of this repository, run `python3 codex/install.py`. It copies the runtime to `~/.codex/session-coord/`, the skill to `~/.codex/skills/session-coord/`, and appends a marked hook block to `~/.codex/config.toml`. Re-running it updates the copies and replaces that block without duplicating it or changing other settings. Restart Codex, then open `/hooks` and review and trust the new hooks. Codex requires that review before user-level hooks run. If your config disables hooks, set `[features] hooks = true` first.
+
+The Codex hooks register a session at `SessionStart`, deliver inbox mail at `UserPromptSubmit`, check git writes at `PreToolUse`, and remove presence at `SessionEnd`. In a Codex CLI 0.161 probe, a session launched with an initial prompt fired `SessionStart` and `UserPromptSubmit`; a bare TUI did not fire `SessionStart` while it waited for its first turn, so it is not yet on the board at that point. Once the session is registered, `session-coord msg <name> "<text>"` files mail and rings an idle Codex pane under tmux; without tmux, mail waits for its next turn. Use `session-coord register --name <name>` in the Codex session to give peers a short addressable name. The Codex adapter uses the same board and inbox as Claude sessions in the same project. The mail and gate paths have Codex-shaped tests; live mail rendering and a live git-write refusal remain unverified.
 
 ## What happens once it is installed
 

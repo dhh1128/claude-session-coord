@@ -75,6 +75,17 @@ def test_unregistered_success_is_typed_only(estate):
     assert store.load_held() == []
 
 
+def test_unknown_direct_send_is_not_held_or_reported_delivered(estate, capsys):
+    def unknown(*a, **kw):
+        raise cli.tmuxio.SendUnknown("composer still holds the message")
+    estate.setattr(cli.tmuxio, "send", unknown)
+    assert cli.main(["msg", "--repo", SENDER, "foreman-imbu", "direct note"]) == 2
+    assert store.load_held() == []
+    err = capsys.readouterr().err
+    assert "send outcome unknown" in err
+    assert "nothing was filed" in err
+
+
 @pytest.mark.parametrize("target", ["%9", "other:2"])
 def test_failed_direct_send_to_tmux_address_files_nothing(estate, capsys, target):
     def refuse(*a, **kw):

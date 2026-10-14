@@ -112,6 +112,65 @@ def is_claude(argv: list[str] | None) -> bool:
     return False
 
 
+def is_codex(argv: list[str] | None) -> bool:
+    """Recognise the native Codex binary and its official npm launcher."""
+    if not argv:
+        return False
+    if os.path.basename(argv[0]) == "codex":
+        return True
+    return (os.path.basename(argv[0]) == "node" and len(argv) > 1
+            and "/@openai/codex/bin/codex.js" in argv[1])
+
+
+def is_codex_headless(argv: list[str] | None) -> bool:
+    """One-shot Codex commands do not occupy the pane as peer sessions."""
+    if not is_codex(argv):
+        return False
+    subcommand = 2 if os.path.basename(argv[0]) == "node" else 1
+    args = argv[subcommand:]
+    value_options = {"-c", "--config", "--enable", "--disable", "--remote",
+                     "--remote-auth-token-env", "-i", "--image", "-m", "--model",
+                     "--local-provider", "-p", "--profile", "-s", "--sandbox",
+                     "-C", "--cd", "--add-dir", "-a", "--ask-for-approval"}
+    short_values = {opt for opt in value_options if opt.startswith("-") and
+                    not opt.startswith("--")}
+    headless = {"agents", "exec", "e", "review", "login", "logout", "mcp",
+                "plugin", "app-server", "remote-control", "completion", "update",
+                "doctor", "sandbox", "debug", "apply", "a", "queue", "archive",
+                "delete", "migrate-rollouts", "unarchive", "cloud", "exec-server",
+                "features", "help"}
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            return False
+        if arg in ("-i", "--image"):
+            # This form consumes bare words through the next option, including filenames
+            # spelled exec, e, or review.
+            i += 2
+            while i < len(args) and not args[i].startswith("-"):
+                i += 1
+            continue
+        if arg.startswith("--image=") or (arg.startswith("-i") and len(arg) > 2):
+            # An attached value is complete, but more image paths can follow it.
+            i += 1
+            while i < len(args) and not args[i].startswith("-") and args[i] not in headless:
+                i += 1
+            continue
+        if arg in value_options:
+            i += 2
+            continue
+        if (any(arg.startswith(opt + "=") for opt in value_options if opt.startswith("--"))
+                or any(arg.startswith(opt) and len(arg) > len(opt) for opt in short_values)):
+            i += 1
+            continue
+        if arg.startswith("-"):
+            i += 1
+            continue
+        return arg in headless
+    return False
+
+
 def claude_ancestor(pid: int | None = None) -> int | None:
     """The nearest `claude` process above `pid` (default: this process), or None."""
     pid = os.getpid() if pid is None else pid
@@ -120,6 +179,19 @@ def claude_ancestor(pid: int | None = None) -> int | None:
         if ppid is None or ppid <= 1:
             return None
         if is_claude(argv_of(ppid)):
+            return ppid
+        pid = ppid
+    return None
+
+
+def codex_ancestor(pid: int | None = None) -> int | None:
+    """The nearest actual Codex process, skipping a guarded shell wrapper."""
+    pid = os.getpid() if pid is None else pid
+    for _ in range(16):
+        ppid = parent_of(pid)
+        if ppid is None or ppid <= 1:
+            return None
+        if is_codex(argv_of(ppid)):
             return ppid
         pid = ppid
     return None

@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Register a Codex TUI from its SessionStart hook payload."""
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from sessioncoord import procio  # noqa: E402
+
+
+def main() -> int:
+    try:
+        payload = json.load(sys.stdin)
+    except (ValueError, OSError):
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+    session_id = payload.get("session_id")
+    cwd = payload.get("cwd")
+    if (not isinstance(session_id, str) or not session_id
+            or not isinstance(cwd, str) or not cwd):
+        return 0
+    pid = procio.codex_ancestor()
+    if pid is None or procio.is_codex_headless(procio.argv_of(pid)):
+        return 0
+    cli = ROOT / "bin" / "session-coord"
+    if not cli.exists():
+        return 0
+    argv = [str(cli), "register", "--engine", "codex", "--session", session_id,
+            "--cwd", cwd, "--pid", str(pid)]
+    pane = os.environ.get("TMUX_PANE")
+    if pane:
+        argv += ["--pane", pane]
+    transcript = payload.get("transcript_path")
+    if isinstance(transcript, str) and transcript:
+        argv += ["--transcript", transcript]
+    name = os.environ.get("SESSION_COORD_NAME")
+    if name:
+        argv += ["--name", name]
+    try:
+        out = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    if out.returncode == 0 and out.stdout.strip():
+        sys.stdout.write(out.stdout)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

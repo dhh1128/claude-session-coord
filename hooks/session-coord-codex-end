@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+"""Remove a Codex presence record before the process leaves its pane."""
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+CLI = Path(__file__).resolve().parents[1] / "bin" / "session-coord"
+
+
+def main() -> int:
+    try:
+        payload = json.load(sys.stdin)
+    except (OSError, ValueError):
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+    session_id = payload.get("session_id")
+    cwd = payload.get("cwd")
+    if (not isinstance(session_id, str) or not session_id
+            or not isinstance(cwd, str) or not cwd or not CLI.exists()):
+        return 0
+    try:
+        subprocess.run([str(CLI), "deregister", "--session", session_id], cwd=cwd,
+                       capture_output=True, timeout=2)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -162,6 +162,15 @@ class TestIdentityWithoutTmux:
         (p,) = store.load_all("/w")
         assert p.session_id == "abc" and p.charter == "sizing the TAM"
 
+    def test_codex_manual_register_without_engine_uses_codex_process(self, world, monkeypatch):
+        monkeypatch.setattr(cli.procio, "claude_ancestor", lambda pid=None: None)
+        monkeypatch.setattr(cli.procio, "codex_ancestor", lambda pid=None: 4242)
+        monkeypatch.setenv("CODEX_SESSION_ID", "codex-thread")
+        assert cli.main(["register", "--name", "worker"]) == 0
+        (p,) = store.load_all("/w")
+        assert p.session_id == "codex-thread"
+        assert p.engine == "codex" and p.claude_pid == 4242 and p.name == "worker"
+
     def test_a_message_to_a_paneless_peer_is_filed_without_a_doorbell(self, world, capsys,
                                                                       monkeypatch):
         cli.main(["register", "--session", "abc", "--pid", "4242", "--name", "me"])

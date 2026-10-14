@@ -32,6 +32,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+from . import procio
+
 Runner = Callable[[list[str]], "str | None"]
 
 # Anything that can move a cursor, submit a line, interrupt a process, or start an escape
@@ -104,6 +106,13 @@ class Unknown(Exception):
     """We were refused sight of a process. Distinct from having looked and found nothing."""
 
 
+class _UnknownPid:
+    """A per-pane observation failure, distinct from an empty pane."""
+
+
+UNKNOWN_PID = _UnknownPid()
+
+
 def _is_claude(pid: int) -> bool:
     """True/False when we could look; raises Unknown when we were not allowed to.
 
@@ -136,8 +145,50 @@ def claude_under(pane_pid: int, kids: dict[int, list[int]]) -> "int | None":
         seen.add(pid)
         if _is_claude(pid):
             return pid  # do not descend: a session's own subagents are not the session
+        if procio.is_codex(_argv_of(pid)):
+            continue  # a Claude started by a Codex tool is not the pane's session
         queue.extend(kids.get(pid, []))
     return None
+
+
+def _argv_of(pid: int) -> list[str] | None:
+    return procio.argv_of(pid)
+
+
+def _pid_exited(pid: int) -> bool:
+    """True only when /proc confirms a vanished process, not when access was refused."""
+    try:
+        os.stat(f"/proc/{pid}")
+    except FileNotFoundError:
+        return True
+    except OSError:
+        pass
+    return False
+
+
+def codex_under(pane_pid: int, kids: dict[int, list[int]]) -> "int | None":
+    """Prefer the nearest interactive native Codex process, including the pane pid itself."""
+    seen: set[int] = set()
+    queue = [int(pane_pid)]
+    launcher = None
+    while queue:
+        pid = queue.pop(0)
+        if pid in seen:
+            continue
+        seen.add(pid)
+        argv = _argv_of(pid)
+        if argv is None:
+            if _pid_exited(pid):
+                continue
+            raise Unknown(f"cannot read argv of {pid}")
+        if procio.is_codex(argv):
+            if procio.is_codex_headless(argv):
+                continue
+            if os.path.basename(argv[0]) == "codex":
+                return pid
+            launcher = pid
+        queue.extend(kids.get(pid, []))
+    return launcher
 
 
 def server_pid(run: Runner = _run) -> "str | None":
@@ -186,7 +237,19 @@ def panes(run: Runner = _run) -> dict[str, dict] | None:
             claude = claude_under(int(pane_pid), kids)
         except (ValueError, Unknown):
             return None
-        result[pane] = {"pane": pane, "window": window, "path": path, "claude_pid": claude,
+        if claude is not None:
+            codex = None
+        else:
+            try:
+                codex = codex_under(int(pane_pid), kids)
+            except Unknown:
+                result[pane] = {"pane": pane, "window": window, "path": path,
+                                "claude_pid": UNKNOWN_PID, "engine": None, "title": title}
+                continue
+        result[pane] = {"pane": pane, "window": window, "path": path,
+                        "claude_pid": claude if claude is not None else codex,
+                        "engine": ("claude" if claude is not None else
+                                   ("codex" if codex is not None else None)),
                         "title": title}
     return result
 
@@ -216,7 +279,7 @@ def pane_of_title(title: str, run: Runner = _run) -> str | None:
     return hits[0] if hits else None
 
 
-def claude_pids(run: Runner = _run) -> dict[str, int | None] | None:
+def claude_pids(run: Runner = _run) -> dict[str, int | None | _UnknownPid] | None:
     """The liveness map, or None when tmux could not be consulted. See `liveness.PaneMap`."""
     table = panes(run)
     if table is None:
@@ -267,11 +330,66 @@ class SendRefused(RuntimeError):
     """Refused to type into another pane. The message says which guard fired."""
 
 
+class SendUnknown(SendRefused):
+    """Keys were sent, but the recipient's prompt did not confirm submission."""
+
+
 # Claude Code's prompt line. An idle prompt is this glyph, a non-breaking space, and nothing.
 PROMPT_GLYPH = "❯"
+CODEX_PROMPT_GLYPH = "›"
 
 
-def prompt_is_busy(pane: str, run: Runner = _run) -> "bool | None":
+def _codex_prompt_state(pane: str, run: Runner = _run) -> str | None:
+    """Return idle, typed, working, or unknown from one visible Codex screen."""
+    out = run(["tmux", "capture-pane", "-p", "-e", "-t", pane])
+    if out is None:
+        return None
+    lines = out.splitlines()
+    prompt = next((i for i in range(len(lines) - 1, -1, -1)
+                   if _typed_text(lines[i]).strip().startswith(CODEX_PROMPT_GLYPH)), None)
+    if prompt is None:
+        return None
+    visible = [_visible_text(line).strip() for line in lines[:prompt]]
+    if any(re.match(r"^•\s+Working\s*\(", line) for line in visible):
+        return "working"
+    rest = _typed_text(lines[prompt]).strip()[len(CODEX_PROMPT_GLYPH):].strip()
+    if rest:
+        return "typed"
+    for line in reversed(visible):
+        if re.search(r"\bWorked for\b", line):
+            return "idle"
+        if re.match(r"^•\s+(?:Ran|Running|Called|Failed|Waiting)\b", line):
+            return None  # a tool card with no visible turn status is not proof of idle
+    return "idle" if any("OpenAI Codex" in line for line in visible) else None
+
+
+def _codex_composer_after_send(pane: str, text: str, run: Runner) -> str | None:
+    """Return submitted, pending, or unknown for the exact text we just typed.
+
+    `-J` joins terminal-wrapped rows, so a long single-line paste can be compared to the
+    original text. A different typed sentence is unknown, not an invitation to submit it.
+    """
+    out = run(["tmux", "capture-pane", "-p", "-e", "-J", "-t", pane])
+    if out is None:
+        return None
+    lines = out.splitlines()
+    for index in range(len(lines) - 1, -1, -1):
+        line = lines[index]
+        stripped = _typed_text(line).strip()
+        if stripped.startswith(CODEX_PROMPT_GLYPH):
+            rest = stripped[len(CODEX_PROMPT_GLYPH):].strip()
+            visible = _visible_text(line).strip()
+            visible_rest = visible[len(CODEX_PROMPT_GLYPH):].strip()
+            if rest or visible_rest == text.strip():
+                return "pending" if rest == text.strip() or visible_rest == text.strip() else None
+            activity = [_visible_text(row).strip() for row in lines[:index]]
+            if any(re.match(r"^•\s+Working\s*\(", row) for row in activity):
+                return "submitted"
+            return None  # an unchanged idle screen may precede the paste being painted
+    return None
+
+
+def prompt_is_busy(pane: str, run: Runner = _run, engine: str = "claude") -> "bool | None":
     """Is the target already holding text somebody typed and has not submitted?
 
     True/False when the prompt line can be found, None when it cannot.
@@ -288,6 +406,9 @@ def prompt_is_busy(pane: str, run: Runner = _run) -> "bool | None":
     # repos carried one ("low stakes, quick check and merge"), so every message to them was
     # refused or left un-rung as "somebody is typing", and he was told to press Enter on
     # sentences he had never written.
+    if engine == "codex":
+        state = _codex_prompt_state(pane, run)
+        return None if state is None else state != "idle"
     out = run(["tmux", "capture-pane", "-p", "-e", "-t", pane])
     if out is None:
         return None
@@ -301,6 +422,11 @@ def prompt_is_busy(pane: str, run: Runner = _run) -> "bool | None":
 
 _SGR = re.compile(r"\x1b\[([0-9;]*)m")
 _OTHER_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07")
+
+
+def _visible_text(line: str) -> str:
+    """Remove terminal escapes while retaining dim Codex activity text."""
+    return _OTHER_ESCAPE.sub("", _SGR.sub("", line))
 
 
 def _typed_text(line: str) -> str:
@@ -393,7 +519,7 @@ def _sweep_old(d: Path, ttl_hours: float = MESSAGE_TTL_HOURS) -> int:
 
 
 def spill(text: str, sender: str = "") -> str:
-    """Write a long message to /tmp and return the path.
+    """Write a long message to a short-lived file and return the path.
 
     /tmp is right for this by Daniel's own rule: these are ephemera whose loss is not a problem,
     and they are read within minutes of being written. The body may contain newlines and
@@ -401,6 +527,11 @@ def spill(text: str, sender: str = "") -> str:
     into a prompt, so inter-session PROSE was impossible until the body moved to a file.
     """
     d = Path(tempfile.gettempdir()) / "session-coord-msgs"
+    # A long TMPDIR (common in worktrees with private on-disk temp roots) makes the pointer
+    # itself too long to be a safe single line. Keep the same age-based cleanup in state.
+    if len(str(d)) > 70:
+        d = Path(os.environ.get("CLAUDE_COORD_HOME") or
+                 Path.home() / ".local" / "state" / "claude-coord") / "msgs"
     d.mkdir(parents=True, exist_ok=True)
     _sweep_old(d)
     stamp = datetime.now().strftime("%H%M%S")
@@ -464,7 +595,7 @@ def send(target: str, text: str, run: Runner = _run, expect_pid: int | None = No
     else:
         text = f" {SIGIL} {text}"
 
-    def resolve() -> str:
+    def resolve() -> tuple[str, str]:
         table = panes(run)
         if table is None:
             raise SendRefused("tmux could not be consulted; nothing was sent.")
@@ -476,26 +607,33 @@ def send(target: str, text: str, run: Runner = _run, expect_pid: int | None = No
         if pane is None or pane not in table:
             raise SendRefused(f"no pane matches {target!r}; nothing was sent.")
         live = table[pane]["claude_pid"]
+        engine = table[pane].get("engine", "claude")
+        if live is UNKNOWN_PID:
+            raise SendRefused(f"{target} process could not be read; nothing was sent.")
         if live is None:
             raise SendRefused(
-                f"{target} holds no Claude session -- it is a plain shell, and sending would "
-                "execute the message as a command. Nothing was sent."
+                f"{target} holds no Claude session or Codex session -- it is a plain shell, and "
+                "sending would execute the message as a command. Nothing was sent."
             )
+        if engine not in ("claude", "codex"):
+            raise SendRefused(f"{target} engine could not be read; nothing was sent.")
         if expect_pid is not None and live != expect_pid:
             raise SendRefused(
-                f"{target} now holds claude pid {live}, not the {expect_pid} this message was "
+                f"{target} now holds session pid {live}, not the {expect_pid} this message was "
                 "addressed to. Pane ids are reused; nothing was sent."
             )
-        return pane
+        return pane, engine
 
-    resolve()
+    _, first_engine = resolve()
     # Re-resolve as late as possible AND use that answer as the destination. Discarding it was
     # worse than not re-checking at all: if `target` is a window label whose pane changed
     # between the two calls, the check validated pane B while the keystrokes still went to the
     # stale pane A -- which may by then be a shell. Narrows the window; tmux offers no atomic
     # send-if-still-this-process, so it cannot close it. Pass `expect_pid` when being wrong is
     # not acceptable.
-    pane = resolve()
+    pane, engine = resolve()
+    if engine != first_engine:
+        raise SendRefused(f"{target} changed engines during delivery; nothing was sent.")
 
     # Never type over somebody mid-sentence. The Enter that delivers this message would submit
     # their unfinished one along with it, and the two arrive as one indistinguishable turn.
@@ -504,7 +642,13 @@ def send(target: str, text: str, run: Runner = _run, expect_pid: int | None = No
     # change under us, and failing closed there would silently kill inter-session messaging on
     # the next Claude Code release -- a worse outcome than an occasional collision, which the
     # attribution prefix at least makes legible. Refuse only on a positive observation.
-    if not force and prompt_is_busy(pane, run) is True:
+    state = _codex_prompt_state(pane, run) if engine == "codex" else None
+    busy = (None if state is None else state != "idle") if engine == "codex" else prompt_is_busy(pane, run)
+    if not force and engine == "codex" and state is None:
+        raise SendRefused(f"{target} Codex prompt could not be read; nothing was sent.")
+    if not force and state == "working":
+        raise SendRefused(f"{target} is working on a turn; nothing was typed. Retry when it is idle.")
+    if not force and busy is True:
         raise SendRefused(
             f"{target} has unsubmitted text in its prompt -- somebody is typing there. Sending "
             "now would append this message to their sentence and submit both as one turn. "
@@ -518,4 +662,16 @@ def send(target: str, text: str, run: Runner = _run, expect_pid: int | None = No
             "unsent in that session's prompt -- tell the user rather than retrying, or the "
             "recipient gets it twice."
         )
+    if engine == "codex":
+        composer = _codex_composer_after_send(pane, text, run)
+        if composer == "pending":
+            # Codex sometimes treats a burst of literal keys as a paste and consumes the first
+            # Enter without submitting it. Retry only while our exact text is still visible.
+            if run(["tmux", "send-keys", "-t", pane, "Enter"]) is None:
+                raise SendUnknown(f"send outcome unknown for {pane}: the second submit keystroke "
+                                  "failed after the text remained in Codex's composer.")
+            composer = _codex_composer_after_send(pane, text, run)
+        if composer != "submitted":
+            raise SendUnknown(f"send outcome unknown for {pane}: Codex's composer did not "
+                              "confirm that the text was submitted. Do not resend automatically.")
     return pane

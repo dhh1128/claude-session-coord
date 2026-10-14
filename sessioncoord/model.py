@@ -35,6 +35,8 @@ class Presence:
     #: told each other "infra:7" about a session that had become infra:6 (2026-10-10).
     title: str = ""
     claude_pid: int | None = None
+    # Process occupying the pane is stored in claude_pid for compatibility with old records.
+    engine: str = "claude"
     charter: str = ""
     claims: tuple[str, ...] = ()
     role: str | None = None
