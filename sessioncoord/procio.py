@@ -141,9 +141,10 @@ def is_codex_headless(argv: list[str] | None) -> bool:
         if arg == "--":
             return False
         if arg in ("-i", "--image"):
-            # The first path is required, even if its filename matches a subcommand.
+            # This form consumes bare words through the next option, including filenames
+            # spelled exec, e, or review.
             i += 2
-            while i < len(args) and not args[i].startswith("-") and args[i] not in headless:
+            while i < len(args) and not args[i].startswith("-"):
                 i += 1
             continue
         if arg.startswith("--image=") or (arg.startswith("-i") and len(arg) > 2):

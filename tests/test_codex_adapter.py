@@ -59,6 +59,7 @@ def test_codex_ancestor_walks_through_guarded_wrapper(monkeypatch):
     (["/opt/bin/codex", "--model", "review", "reply OK"], False),
     (["/opt/bin/codex", "--cd=review", "reply OK"], False),
     (["/opt/bin/codex", "--image", "one.png", "two.png", "--model", "x", "exec"], True),
+    (["/opt/bin/codex", "--image", "/etc/hosts", "exec"], False),
     (["/opt/bin/codex", "--image=one.png", "exec", "--help"], True),
     (["/opt/bin/codex", "--image=/etc/hosts", "/etc/hosts", "exec", "--help"], True),
     (["/opt/bin/codex", "-ione.png", "review", "--help"], True),
@@ -300,6 +301,21 @@ def test_session_start_hook_accepts_review_as_directory_name(monkeypatch, tmp_pa
                             run_name="codex_test")
     monkeypatch.setattr(procio, "codex_ancestor", lambda: 1234)
     monkeypatch.setattr(procio, "argv_of", lambda pid: ["/opt/bin/codex", "-C", "review"])
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({
+        "session_id": "thread-1", "cwd": str(tmp_path), "source": "startup"})))
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: (
+        calls.append(argv) or SimpleNamespace(returncode=0, stdout="")))
+    assert module["main"]() == 0
+    assert calls and "thread-1" in calls[0]
+
+
+def test_session_start_hook_accepts_exec_as_separate_image_value(monkeypatch, tmp_path):
+    module = runpy.run_path(str(ROOT / "hooks" / "session-coord-codex-register"),
+                            run_name="codex_test")
+    monkeypatch.setattr(procio, "codex_ancestor", lambda: 1234)
+    monkeypatch.setattr(procio, "argv_of", lambda pid: ["/opt/bin/codex", "--image",
+                                                       "/etc/hosts", "exec"])
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({
         "session_id": "thread-1", "cwd": str(tmp_path), "source": "startup"})))
     calls = []
