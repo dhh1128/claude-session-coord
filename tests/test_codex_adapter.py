@@ -59,6 +59,8 @@ def test_codex_ancestor_walks_through_guarded_wrapper(monkeypatch):
     (["/opt/bin/codex", "--model", "review", "reply OK"], False),
     (["/opt/bin/codex", "--cd=review", "reply OK"], False),
     (["/opt/bin/codex", "--image", "one.png", "two.png", "--model", "x", "exec"], True),
+    (["/opt/bin/codex", "--image=one.png", "exec", "--help"], True),
+    (["/opt/bin/codex", "-ione.png", "review", "--help"], True),
     (["/opt/bin/codex", "-i", "review", "two.png", "--model", "x", "reply OK"], False),
     (["/opt/bin/codex", "--", "review"], False),
     (["/opt/bin/codex", "--dangerously-bypass-approvals-and-sandbox", "prompt"], False),
@@ -278,7 +280,8 @@ def test_session_start_hook_registers_a_forked_thread(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("args", [["e"], ["review"],
-                                  ["--image", "one.png", "two.png", "--model", "x", "exec"]])
+                                  ["--image", "one.png", "two.png", "--model", "x", "exec"],
+                                  ["--image=one.png", "exec", "--help"]])
 def test_session_start_hook_ignores_other_one_shot_commands(monkeypatch, tmp_path, args):
     module = runpy.run_path(str(ROOT / "hooks" / "session-coord-codex-register"),
                             run_name="codex_test")
