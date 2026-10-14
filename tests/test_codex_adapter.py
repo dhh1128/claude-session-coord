@@ -19,6 +19,13 @@ from sessioncoord.model import Presence
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def codex_screen(name):
+    """Restore the captured ESC bytes while keeping the fixture diff printable."""
+    stored = (ROOT / "tests" / "data" / f"codex-{name}.txt").read_text()
+    assert "\x1b" not in stored
+    return stored.replace(r"\x1b", "\x1b")
+
+
 @pytest.mark.parametrize("argv,want", [
     (["/opt/codex/bin/codex", "--dangerously-bypass-approvals-and-sandbox"], True),
     (["node", "/opt/lib/node_modules/@openai/codex/bin/codex.js"], True),
@@ -61,7 +68,7 @@ def test_codex_pane_discovers_native_child_after_node_wrapper(monkeypatch):
         if argv[1] == "list-panes":
             return "%3\tprobe:1\t10\t/repo\tcodex-coord"
         if argv[1] == "capture-pane":
-            return (ROOT / "tests" / "data" / "codex-idle.txt").read_text()
+            return codex_screen("idle")
         return "ok"
     table = tmuxio.panes(run)
     assert table["%3"]["engine"] == "codex"
@@ -77,7 +84,7 @@ def test_claude_tool_child_does_not_relabel_codex_pane(monkeypatch):
 
 
 def test_codex_busy_fixture_overrides_empty_input():
-    screen = (ROOT / "tests" / "data" / "codex-busy.txt").read_text()
+    screen = codex_screen("busy")
     assert tmuxio.prompt_is_busy("%3", lambda argv: screen, engine="codex") is True
 
 
@@ -140,7 +147,7 @@ def test_idle_codex_receives_literal_doorbell(monkeypatch):
         "%3": {"pane": "%3", "window": "probe:1", "path": "/repo",
                "title": "codex-coord", "claude_pid": 30, "engine": "codex"}
     })
-    screen = (ROOT / "tests" / "data" / "codex-idle.txt").read_text()
+    screen = codex_screen("idle")
     calls = []
     def run(argv):
         calls.append(argv)
@@ -159,7 +166,7 @@ def test_codex_retries_enter_once_when_paste_remains(monkeypatch, clears_after_r
         "%3": {"pane": "%3", "window": "probe:1", "path": "/repo",
                "title": "codex-coord", "claude_pid": 30, "engine": "codex"}
     })
-    idle = (ROOT / "tests" / "data" / "codex-idle.txt").read_text()
+    idle = codex_screen("idle")
     calls = []
     typed = None
     enters = 0
@@ -196,7 +203,7 @@ def test_codex_does_not_submit_a_different_composer(monkeypatch):
         "%3": {"pane": "%3", "window": "probe:1", "path": "/repo",
                "title": "codex-coord", "claude_pid": 30, "engine": "codex"}
     })
-    idle = (ROOT / "tests" / "data" / "codex-idle.txt").read_text()
+    idle = codex_screen("idle")
     calls = []
     def run(argv):
         calls.append(argv)
@@ -214,7 +221,7 @@ def test_working_codex_keeps_doorbell_untyped(monkeypatch):
         "%3": {"pane": "%3", "window": "probe:1", "path": "/repo",
                "title": "codex-coord", "claude_pid": 30, "engine": "codex"}
     })
-    screen = (ROOT / "tests" / "data" / "codex-busy.txt").read_text()
+    screen = codex_screen("busy")
     calls = []
     def run(argv):
         calls.append(argv)
