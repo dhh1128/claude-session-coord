@@ -134,20 +134,23 @@ def is_codex_headless(argv: list[str] | None) -> bool:
                      "-C", "--cd", "--add-dir", "-a", "--ask-for-approval"}
     short_values = {opt for opt in value_options if opt.startswith("-") and
                     not opt.startswith("--")}
+    headless = {"exec", "e", "review"}
     i = 0
     while i < len(args):
         arg = args[i]
         if arg == "--":
             return False
         if arg in ("-i", "--image"):
-            # The global image option accepts multiple file paths up to the next option.
-            i += 1
-            while i < len(args) and not args[i].startswith("-"):
+            # The first path is required, even if its filename matches a subcommand.
+            i += 2
+            while i < len(args) and not args[i].startswith("-") and args[i] not in headless:
                 i += 1
             continue
         if arg.startswith("--image=") or (arg.startswith("-i") and len(arg) > 2):
-            # An attached value is complete; the following word may be the subcommand.
+            # An attached value is complete, but more image paths can follow it.
             i += 1
+            while i < len(args) and not args[i].startswith("-") and args[i] not in headless:
+                i += 1
             continue
         if arg in value_options:
             i += 2
@@ -159,7 +162,7 @@ def is_codex_headless(argv: list[str] | None) -> bool:
         if arg.startswith("-"):
             i += 1
             continue
-        return arg in ("exec", "e", "review")
+        return arg in headless
     return False
 
 
