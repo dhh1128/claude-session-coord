@@ -149,6 +149,64 @@ def test_idle_codex_receives_literal_doorbell(monkeypatch):
     sends = [argv for argv in calls if argv[1] == "send-keys"]
     assert sends[0][:6] == ["tmux", "send-keys", "-t", "%3", "-l", "--"]
     assert sends[1][-1] == "Enter"
+    assert len(sends) == 2
+    assert sum(argv[1] == "capture-pane" for argv in calls) == 2
+
+
+@pytest.mark.parametrize("clears_after_retry", [True, False])
+def test_codex_retries_enter_once_when_paste_remains(monkeypatch, clears_after_retry):
+    monkeypatch.setattr(tmuxio, "panes", lambda run=None: {
+        "%3": {"pane": "%3", "window": "probe:1", "path": "/repo",
+               "title": "codex-coord", "claude_pid": 30, "engine": "codex"}
+    })
+    idle = (ROOT / "tests" / "data" / "codex-idle.txt").read_text()
+    calls = []
+    typed = None
+    enters = 0
+
+    def run(argv):
+        nonlocal typed, enters
+        calls.append(argv)
+        if argv[1] == "send-keys":
+            if "-l" in argv:
+                typed = argv[-1]
+            else:
+                enters += 1
+            return "ok"
+        if argv[1] == "capture-pane":
+            if enters == 0 or (enters == 2 and clears_after_retry):
+                return idle
+            return f"  >_ OpenAI Codex (v0.161.0)\n\n› {typed}\n"
+        return "ok"
+
+    message = "session-coord inbox " + "long paste " * 16
+    if clears_after_retry:
+        assert tmuxio.send("%3", message, run, spill_over=0) == "%3"
+    else:
+        with pytest.raises(tmuxio.SendUnknown, match="unknown"):
+            tmuxio.send("%3", message, run, spill_over=0)
+    assert enters == 2
+    assert sum(argv[1] == "capture-pane" for argv in calls) == 3
+    assert all("-J" in argv for argv in calls if argv[1] == "capture-pane" and
+               argv != calls[0])
+
+
+def test_codex_does_not_submit_a_different_composer(monkeypatch):
+    monkeypatch.setattr(tmuxio, "panes", lambda run=None: {
+        "%3": {"pane": "%3", "window": "probe:1", "path": "/repo",
+               "title": "codex-coord", "claude_pid": 30, "engine": "codex"}
+    })
+    idle = (ROOT / "tests" / "data" / "codex-idle.txt").read_text()
+    calls = []
+    def run(argv):
+        calls.append(argv)
+        if argv[1] == "capture-pane":
+            return idle if len([call for call in calls if call[1] == "capture-pane"]) == 1 else (
+                "  >_ OpenAI Codex (v0.161.0)\n\n› another sentence\n")
+        return "ok"
+    with pytest.raises(tmuxio.SendUnknown, match="unknown"):
+        tmuxio.send("%3", "session-coord inbox", run)
+    assert sum(argv[1] == "send-keys" and argv[-1] == "Enter" for argv in calls) == 1
 
 
 def test_working_codex_keeps_doorbell_untyped(monkeypatch):

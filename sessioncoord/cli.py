@@ -791,6 +791,10 @@ def cmd_msg(args) -> int:
         try:
             pane = tmuxio.send(target, inbox_mod.DOORBELL, expect_pid=expect, sender="",
                                force=args.force, spill_over=0)
+        except tmuxio.SendUnknown as e:
+            print(f"filed for {recipient.label}; doorbell outcome unknown: {e}",
+                  file=sys.stderr)
+            return 0
         except tmuxio.SendRefused as e:
             print(f"filed for {recipient.label}, but the doorbell could not be rung: {e}",
                   file=sys.stderr)
@@ -808,6 +812,11 @@ def cmd_msg(args) -> int:
         try:
             pane = tmuxio.send(target, comms.compose(args.text, reply), expect_pid=expect,
                                sender=sender, force=args.force)
+        except tmuxio.SendUnknown as e:
+            # Typing may have delivered this turn. Holding a second copy would risk duplication.
+            print(f"session-coord: send outcome unknown; nothing was filed: {e}",
+                  file=sys.stderr)
+            return 2
         except tmuxio.SendRefused as e:
             refused = str(e)
         else:

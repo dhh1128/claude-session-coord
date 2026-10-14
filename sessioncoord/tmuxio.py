@@ -328,6 +328,10 @@ class SendRefused(RuntimeError):
     """Refused to type into another pane. The message says which guard fired."""
 
 
+class SendUnknown(SendRefused):
+    """Keys were sent, but the recipient's prompt did not confirm submission."""
+
+
 # Claude Code's prompt line. An idle prompt is this glyph, a non-breaking space, and nothing.
 PROMPT_GLYPH = "❯"
 CODEX_PROMPT_GLYPH = "›"
@@ -355,6 +359,25 @@ def _codex_prompt_state(pane: str, run: Runner = _run) -> str | None:
         if re.match(r"^•\s+(?:Ran|Running|Called|Failed|Waiting)\b", line):
             return None  # a tool card with no visible turn status is not proof of idle
     return "idle" if any("OpenAI Codex" in line for line in visible) else None
+
+
+def _codex_composer_after_send(pane: str, text: str, run: Runner) -> str | None:
+    """Return clear, pending, or unknown for the exact text we just typed.
+
+    `-J` joins terminal-wrapped rows, so a long single-line paste can be compared to the
+    original text. A different typed sentence is unknown, not an invitation to submit it.
+    """
+    out = run(["tmux", "capture-pane", "-p", "-e", "-J", "-t", pane])
+    if out is None:
+        return None
+    for line in reversed(out.splitlines()):
+        stripped = _typed_text(line).strip()
+        if stripped.startswith(CODEX_PROMPT_GLYPH):
+            rest = stripped[len(CODEX_PROMPT_GLYPH):].strip()
+            if not rest:
+                return "clear"
+            return "pending" if rest == text.strip() else None
+    return None
 
 
 def prompt_is_busy(pane: str, run: Runner = _run, engine: str = "claude") -> "bool | None":
@@ -630,4 +653,16 @@ def send(target: str, text: str, run: Runner = _run, expect_pid: int | None = No
             "unsent in that session's prompt -- tell the user rather than retrying, or the "
             "recipient gets it twice."
         )
+    if engine == "codex":
+        composer = _codex_composer_after_send(pane, text, run)
+        if composer == "pending":
+            # Codex sometimes treats a burst of literal keys as a paste and consumes the first
+            # Enter without submitting it. Retry only while our exact text is still visible.
+            if run(["tmux", "send-keys", "-t", pane, "Enter"]) is None:
+                raise SendUnknown(f"send outcome unknown for {pane}: the second submit keystroke "
+                                  "failed after the text remained in Codex's composer.")
+            composer = _codex_composer_after_send(pane, text, run)
+        if composer != "clear":
+            raise SendUnknown(f"send outcome unknown for {pane}: Codex's composer did not "
+                              "confirm that the text was submitted. Do not resend automatically.")
     return pane
