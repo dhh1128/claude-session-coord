@@ -2,8 +2,8 @@
   "name": "session-coord",
   "description": "Coordinate several Claude Code sessions working in one project: see who else is here and what they are doing, claim the files you will write, hand sequencing to one conductor session, message a peer directly, and keep one queue of questions for the human. Works with or without git and tmux.",
   "author": { "name": "Daniel Hardman", "url": "https://github.com/dhh1128" },
-  "homepage": "https://github.com/dhh1128/claude-session-coord",
-  "repository": "https://github.com/dhh1128/claude-session-coord",
+  "homepage": "https://github.com/dhh1128/session-coord",
+  "repository": "https://github.com/dhh1128/session-coord",
   "license": "Apache-2.0",
   "keywords": ["coordination", "multi-session", "concurrency", "workflow"]
 }

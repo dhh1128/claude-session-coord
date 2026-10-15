@@ -194,6 +194,10 @@ The tool was extracted from a private dev-environment repository so it could be 
 
 **Unverified.** These have not been tested on a real Mac. The `ps` path is exercised on Linux by forcing the fallback, and the `lstart` format is assumed to be stable for the life of a process, which it should be. Two sessions outside tmux have been simulated end to end (register, board, claim overlap, message, delivery, sweep of the dead peer) but have never been run as two real Claude sessions.
 
+## Repository renamed, 2026-10-15
+
+The public repository and local clone take the name `session-coord` because the same tool serves Codex as well as Claude. Keeping the original `claude-session-coord` repository name would imply a Claude-only scope; the plugin, marketplace, CLI, and skill already use `session-coord`. The earlier name remains only in captured screen fixtures, where it records the path visible during the Codex probe.
+
 ## Codex hook and TUI facts, 2026-10-14
 
 OpenAI's [Hooks documentation](https://learn.chatgpt.com/docs/hooks) lists `SessionStart`, `UserPromptSubmit`, and `SessionEnd` for Codex CLI. Command hooks receive JSON on stdin with `session_id`, `cwd`, `transcript_path`, and `hook_event_name`; `SessionStart` also receives `source` (`startup`, `resume`, `clear`, `compact`, or `fork`). `UserPromptSubmit` can add context with the same `hookSpecificOutput` shape the Claude mail hook uses. User-level hooks in `~/.codex/config.toml` are an active source even for an untrusted project, but a changed non-managed hook must be reviewed and trusted through `/hooks` before it runs. Hooks are a stable feature in the installed Codex CLI 0.161.0. Its `[[hooks.SessionStart]]` TOML form is used in a local project on this machine.
