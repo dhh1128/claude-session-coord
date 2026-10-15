@@ -28,7 +28,7 @@ def hook_block(runtime: Path) -> str:
         ("UserPromptSubmit", "session-coord-mail", None, 20,
          "session-coord: deliver peer mail"),
         ("PreToolUse", "session-coord-gate", "", 15,
-         "session-coord: refuse writes in a shared tree"),
+         "session-coord: check git writes in a shared tree"),
         ("SessionEnd", "session-coord-codex-end", None, 3,
          "session-coord: remove presence"),
     )

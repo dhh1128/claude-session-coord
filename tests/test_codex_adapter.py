@@ -451,6 +451,8 @@ def test_installer_names_each_codex_hook(tmp_path):
         message = handlers[0]["statusMessage"]
         assert message.startswith("session-coord:")
         assert message.removeprefix("session-coord:").strip()
+        if event == "PreToolUse":
+            assert message == "session-coord: check git writes in a shared tree"
 
 
 def test_failed_reinstall_keeps_active_gate(tmp_path, monkeypatch):
