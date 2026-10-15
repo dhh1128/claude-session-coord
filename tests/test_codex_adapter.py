@@ -443,6 +443,18 @@ def test_installer_is_idempotent_and_preserves_existing_config(tmp_path):
     assert parsed["hooks"]["PreToolUse"][-1]["matcher"] == ""
 
 
+def test_installer_names_each_codex_hook(tmp_path):
+    parsed = tomllib.loads(codex_install.hook_block(tmp_path / "runtime"))
+    for event in ("SessionStart", "UserPromptSubmit", "PreToolUse", "SessionEnd"):
+        handlers = parsed["hooks"][event][0]["hooks"]
+        assert len(handlers) == 1
+        message = handlers[0]["statusMessage"]
+        assert message.startswith("session-coord:")
+        assert message.removeprefix("session-coord:").strip()
+        if event == "PreToolUse":
+            assert message == "session-coord: check git writes in a shared tree"
+
+
 def test_failed_reinstall_keeps_active_gate(tmp_path, monkeypatch):
     config = tmp_path / "config.toml"
     runtime = tmp_path / "runtime"
