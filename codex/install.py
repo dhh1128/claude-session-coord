@@ -23,19 +23,24 @@ def _toml_string(value: str) -> str:
 def hook_block(runtime: Path) -> str:
     hooks = runtime.expanduser().resolve() / "hooks"
     entries = (
-        ("SessionStart", "session-coord-codex-register", None, 15),
-        ("UserPromptSubmit", "session-coord-mail", None, 20),
-        ("PreToolUse", "session-coord-gate", "", 15),
-        ("SessionEnd", "session-coord-codex-end", None, 3),
+        ("SessionStart", "session-coord-codex-register", None, 15,
+         "session-coord: register this session"),
+        ("UserPromptSubmit", "session-coord-mail", None, 20,
+         "session-coord: deliver peer mail"),
+        ("PreToolUse", "session-coord-gate", "", 15,
+         "session-coord: refuse writes in a shared tree"),
+        ("SessionEnd", "session-coord-codex-end", None, 3,
+         "session-coord: remove presence"),
     )
     lines = [START]
-    for event, script, matcher, timeout in entries:
+    for event, script, matcher, timeout, status_message in entries:
         lines += [f"[[hooks.{event}]]"]
         if matcher is not None:
             lines += [f"matcher = {_toml_string(matcher)}"]
         lines += [f"[[hooks.{event}.hooks]]", 'type = "command"',
                   f"command = {_toml_string(shlex.quote(str(hooks / script)))}",
-                  f"timeout = {timeout}", ""]
+                  f"timeout = {timeout}",
+                  f"statusMessage = {_toml_string(status_message)}", ""]
     lines += [END]
     return "\n".join(lines) + "\n"
 
